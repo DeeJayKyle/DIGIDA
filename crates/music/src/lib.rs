@@ -435,6 +435,12 @@ pub trait Player: Send + Sync {
     fn seek(&self, position: Duration);
     fn set_gain(&self, gain: f32);
 
+    /// Sets the streaming engine's combined speed and pitch shift. Sources without this
+    /// processing leave playback unchanged.
+    fn set_speed_pitch(&self, speed: f32, pitch_semitones: f32) {
+        let _ = (speed, pitch_semitones);
+    }
+
     fn spectrum(&self) -> Option<Spectrum> {
         None
     }

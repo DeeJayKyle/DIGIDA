@@ -12,8 +12,8 @@ use i18n::t;
 use input::{ToggleFullscreen, ToggleLyrics, ToggleQueue};
 use state::{AppSettings, Playback, Queue, SideTab, Sonora};
 use ui::{
-    Artwork, Button, ExplicitBadge, InlineLink, InlineLinks, Popup, Room, Scrollbar, Scrubber,
-    ScrubberState, clock, tabular,
+    Artwork, Button, ExplicitBadge, InlineLink, InlineLinks, Menu, Popup, Room, Scrollbar,
+    Scrubber, ScrubberState, clock, tabular,
 };
 
 use crate::chrome::SidebarRight;
@@ -25,6 +25,7 @@ const VOLUME_WIDTH: f32 = 110.;
 const VOLUME_TIGHT: f32 = 72.;
 const CLOCK_SHORT: f32 = 3.4;
 const CLOCK_LONG: f32 = 5.4;
+const RATE_POPUP_WIDTH: f32 = 192.;
 
 pub(crate) struct PlayerBar {
     playback: Entity<Playback>,
@@ -34,6 +35,9 @@ pub(crate) struct PlayerBar {
     context_menu: Option<(music::Track, Point<Pixels>)>,
     seek: ScrubberState,
     volume: ScrubberState,
+    rate_speed: ScrubberState,
+    rate_pitch: ScrubberState,
+    rate_popup: Option<Point<Pixels>>,
     pending: Option<f32>,
     over_seek: Option<f32>,
     over_volume: Option<f32>,
@@ -61,6 +65,9 @@ impl PlayerBar {
             context_menu: None,
             seek: ScrubberState::new("seek"),
             volume: ScrubberState::new("volume"),
+            rate_speed: ScrubberState::new("rate-speed"),
+            rate_pitch: ScrubberState::new("rate-pitch"),
+            rate_popup: None,
             pending: None,
             over_seek: None,
             over_volume: None,
@@ -185,6 +192,8 @@ impl PlayerBar {
             let settings = self.settings.read(cx);
             (settings.sidebar_right_open(), settings.sidebar_right_tab())
         };
+        let show_rate = self.settings.read(cx).playback_rate_controls()
+            && self.playback.read(cx).rate_controls_available();
 
         let button = move |id: &'static str, icon: &'static str, hint: &'static str, side| {
             let showing = open && tab == side;
@@ -219,12 +228,130 @@ impl PlayerBar {
                 "lyrics-title",
                 SideTab::Lyrics,
             ))
+            .when(show_rate, |this| {
+                this.child(
+                    Button::new("player-rate")
+                        .ghost()
+                        .small()
+                        .icon("icons/sliders-horizontal.svg")
+                        .tooltip("player-rate-controls")
+                        .selected(self.rate_popup.is_some())
+                        .on_click(cx.listener(|this, event: &gpui::ClickEvent, _, cx| {
+                            this.rate_popup = Some(event.position());
+                            cx.notify();
+                        })),
+                )
+            })
             .child(button(
                 "player-queue",
                 "icons/list-music.svg",
                 "queue-title",
                 SideTab::Queue,
             ))
+            .into_any_element()
+    }
+
+    fn rate_panel(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = *cx.theme();
+        let playback = self.playback.read(cx);
+        let speed = playback.speed();
+        let pitch = playback.pitch();
+        let speed_fraction = (speed - 0.5) / 1.5;
+        let pitch_fraction = (pitch + 12.) / 24.;
+        let speed_playback = self.playback.clone();
+        let pitch_playback = self.playback.clone();
+
+        let reset_playback = self.playback.clone();
+
+        div()
+            .w(px(RATE_POPUP_WIDTH))
+            .flex()
+            .flex_col()
+            .gap_2()
+            .p_2()
+            .rounded_md()
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.popover)
+            .text_color(theme.popover_foreground)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .text_size(theme.text(ui::Text::Small))
+                    .child(t!("player-rate-controls"))
+                    .child(
+                        Button::new("player-rate-reset")
+                            .ghost()
+                            .small()
+                            .icon("icons/refresh-cw.svg")
+                            .tooltip("player-rate-reset")
+                            .on_click(move |_, _, cx| {
+                                reset_playback.update(cx, |playback, cx| {
+                                    playback.set_speed_pitch(1., 0., cx)
+                                });
+                            }),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_0p5()
+                    .child(
+                        div()
+                            .flex()
+                            .justify_between()
+                            .text_size(theme.text(ui::Text::Tiny))
+                            .child(t!("player-speed"))
+                            .child(t!("player-speed-value", value = format!("{speed:.2}"))),
+                    )
+                    .child(
+                        Scrubber::new(&self.rate_speed, speed_fraction)
+                            .h(px(16.))
+                            .colors(
+                                theme.progress_bar,
+                                theme.muted_foreground.opacity(0.3),
+                                theme.foreground,
+                            )
+                            .on_move(move |fraction, _, cx| {
+                                let speed = 0.5 + fraction * 1.5;
+                                speed_playback.update(cx, |playback, cx| {
+                                    playback.set_speed_pitch(speed, playback.pitch(), cx)
+                                });
+                            }),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_0p5()
+                    .child(
+                        div()
+                            .flex()
+                            .justify_between()
+                            .text_size(theme.text(ui::Text::Tiny))
+                            .child(t!("player-pitch"))
+                            .child(t!("player-pitch-value", value = format!("{pitch:+.0}"))),
+                    )
+                    .child(
+                        Scrubber::new(&self.rate_pitch, pitch_fraction)
+                            .h(px(16.))
+                            .colors(
+                                theme.progress_bar,
+                                theme.muted_foreground.opacity(0.3),
+                                theme.foreground,
+                            )
+                            .on_move(move |fraction, _, cx| {
+                                let pitch = -12. + fraction * 24.;
+                                pitch_playback.update(cx, |playback, cx| {
+                                    playback.set_speed_pitch(playback.speed(), pitch, cx)
+                                });
+                            }),
+                    ),
+            )
             .into_any_element()
     }
 
@@ -372,11 +499,10 @@ impl Render for PlayerBar {
         let playback = self.playback.read(cx);
         let seekable = playback.track().is_some();
         let progress = self.pending.unwrap_or_else(|| playback.progress());
-        let elapsed = playback.position();
-        let total = playback
-            .track()
-            .map(|track| track.duration)
-            .unwrap_or(Duration::ZERO);
+        let elapsed = playback
+            .live_position()
+            .div_f64(f64::from(playback.speed().clamp(0.5, 2.)));
+        let total = playback.duration().unwrap_or(Duration::ZERO);
         let clock_width = clock_text
             * match total.as_secs() >= 3600 {
                 true => CLOCK_LONG,
@@ -450,6 +576,22 @@ impl Render for PlayerBar {
                 },
             ))
         });
+        let rate_popup = self
+            .rate_popup
+            .filter(|_| {
+                self.settings.read(cx).playback_rate_controls()
+                    && self.playback.read(cx).rate_controls_available()
+            })
+            .map(|position| {
+                Popup::new(
+                    position,
+                    Menu::new("player-rate-menu").header(self.rate_panel(cx)),
+                )
+                .on_close(cx.listener(|this, _, _, cx| {
+                    this.rate_popup = None;
+                    cx.notify();
+                }))
+            });
 
         let content = match stacked {
             true => base
@@ -506,6 +648,8 @@ impl Render for PlayerBar {
                 ),
         };
 
-        content.when_some(context_menu, |this, menu| this.child(menu))
+        content
+            .when_some(context_menu, |this, menu| this.child(menu))
+            .when_some(rate_popup, |this, popup| this.child(popup))
     }
 }

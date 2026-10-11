@@ -16,6 +16,7 @@
 //! Loudness normalisation lives here too. A provider only reports how loud a track is, and the
 //! engine decides what gain that earns.
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, TryRecvError, channel};
 use std::time::{Duration, Instant};
@@ -33,6 +34,9 @@ use crate::{PlaybackConfig, PlaybackEvent, PlaybackEvents, Player};
 /// How many frames the decoder hands over at a time. Small enough that a skip is heard at once,
 /// large enough that the queue is not rebuilt for every few samples.
 const CHUNK: usize = 4096;
+/// A shorter run-ahead for the YouTube engine makes tempo and pitch changes responsive while
+/// leaving Spotify's independent output queue at its original depth.
+const RATE_QUEUE_CHUNKS: usize = 8;
 /// The level normalisation brings every track to, in LUFS. Spotify and YouTube both play at
 /// about this level, so a track sounds as loud here whichever service it came from.
 const TARGET_LUFS: f32 = -14.0;
@@ -156,6 +160,7 @@ enum Command {
     Pause,
     Seek(Duration),
     Gain(f32),
+    Rate(f32, f32),
 }
 
 /// What the audio thread is told to do. Everything that touches the network has happened by the
@@ -181,6 +186,7 @@ enum Job<F: Fetch> {
     /// Move within the track being decoded. The bytes are already arriving, so this is local.
     Seek(Duration),
     Gain(f32),
+    Rate(f32, f32),
 }
 
 struct Handle {
@@ -234,6 +240,12 @@ impl Player for Handle {
 
     fn set_gain(&self, gain: f32) {
         self.commands.send(Command::Gain(gain)).ok();
+    }
+
+    fn set_speed_pitch(&self, speed: f32, pitch_semitones: f32) {
+        self.commands
+            .send(Command::Rate(speed, pitch_semitones))
+            .ok();
     }
 
     fn spectrum(&self) -> Option<Spectrum> {
@@ -493,6 +505,9 @@ async fn engine_loop<F: Fetch>(
                     Command::Gain(level) => {
                         jobs.send(Job::Gain(level)).ok();
                     }
+                    Command::Rate(speed, pitch) => {
+                        jobs.send(Job::Rate(speed, pitch)).ok();
+                    }
                 }
             }
             arrival = arrivals.recv() => {
@@ -706,6 +721,12 @@ struct Playing<F: Fetch> {
     /// The track's normalisation gain, applied to every sample as it is decoded. Each track
     /// carries its own, so a gapless join changes it on the first sample of the next one.
     gain: f32,
+    speed: f32,
+    pitch: f32,
+    processor: soundtouch::SoundTouch,
+    processed: VecDeque<f32>,
+    processed_active: bool,
+    finished: bool,
 }
 
 impl<F: Fetch> Playing<F> {
@@ -720,15 +741,26 @@ impl<F: Fetch> Playing<F> {
     ) -> Option<Self> {
         let source = fetch.open(id, &loaded, at)?;
         let gain = normalisation(normalise, fetch.loudness(&loaded));
+        let channels = source.channels().get();
+        let rate = source.sample_rate().get();
+        let mut processor = soundtouch::SoundTouch::new();
+        processor.set_channels(u32::from(channels));
+        processor.set_sample_rate(rate);
         Some(Self {
             id: id.to_owned(),
-            channels: source.channels().get(),
-            rate: source.sample_rate().get(),
+            channels,
+            rate,
             loaded,
             source,
             base: at,
             offset,
             gain,
+            speed: 1.,
+            pitch: 0.,
+            processor,
+            processed: VecDeque::new(),
+            processed_active: false,
+            finished: false,
         })
     }
 
@@ -736,20 +768,68 @@ impl<F: Fetch> Playing<F> {
         Mark {
             id: self.id.clone(),
             channels: self.channels,
-            rate: self.rate,
+            rate: ((self.rate as f32) / self.speed).round().max(1.) as u32,
             base: self.base,
             offset: self.offset,
         }
     }
 
-    /// Pulls up to `frames` frames out of the decoder. `None` means the track ended.
+    fn set_rate(&mut self, speed: f32, pitch: f32) {
+        self.speed = speed.clamp(0.5, 2.);
+        self.pitch = pitch.clamp(-12., 12.);
+        self.processed_active |= self.speed != 1. || self.pitch != 0.;
+        self.processor
+            .set_tempo(f64::from(self.speed))
+            .set_pitch(2_f64.powf(f64::from(self.pitch) / 12.));
+    }
+
+    /// Feeds decoded audio through SoundTouch, which changes tempo and pitch independently.
     fn take(&mut self, frames: usize) -> Option<Vec<f32>> {
-        let wanted = frames * usize::from(self.channels).max(1);
-        let mut samples = Vec::with_capacity(wanted);
-        for sample in self.source.by_ref().take(wanted) {
-            samples.push(sample * self.gain);
+        let channels = usize::from(self.channels).max(1);
+        let wanted = frames * channels;
+        if !self.processed_active {
+            let samples: Vec<f32> = self
+                .source
+                .by_ref()
+                .take(wanted)
+                .map(|sample| sample * self.gain)
+                .collect();
+            return (!samples.is_empty()).then_some(samples);
         }
-        (!samples.is_empty()).then_some(samples)
+        while self.processed.len() < wanted {
+            let mut output = vec![0.; wanted.max(CHUNK * channels)];
+            let output_frames = output.len() / channels;
+            let received = self.processor.receive_samples(&mut output, output_frames);
+            output.truncate(received * channels);
+            self.processed.extend(output);
+            if received > 0 {
+                continue;
+            }
+            if self.finished {
+                break;
+            }
+
+            let input: Vec<f32> = self
+                .source
+                .by_ref()
+                .take(CHUNK * channels)
+                .map(|sample| sample * self.gain)
+                .collect();
+            if input.is_empty() {
+                self.processor.flush();
+                self.finished = true;
+            } else {
+                self.processor.put_samples(&input, input.len() / channels);
+            }
+        }
+        if self.processed.is_empty() {
+            return None;
+        }
+        Some(
+            (0..wanted.min(self.processed.len()))
+                .filter_map(|_| self.processed.pop_front())
+                .collect(),
+        )
     }
 }
 
@@ -809,7 +889,10 @@ fn audio_loop<F: Fetch>(
     let mut joining: Option<Join> = None;
     let mut heard: Option<Mark> = None;
     let mut queued: Option<(String, F::Loaded)> = None;
+    let mut deferred: Option<Job<F>> = None;
     let mut playing = false;
+    let mut speed = 1.;
+    let mut pitch = 0.;
     let mut reported_at = Instant::now();
 
     loop {
@@ -822,16 +905,19 @@ fn audio_loop<F: Fetch>(
         // track, a paused one, or a full queue. A restored track sits paused
         // with an empty queue, which the old condition mistook for decoding.
         let idle = current.is_none() || !playing || paced.full() || refitting;
-        let job = match idle {
-            false => match jobs.try_recv() {
-                Ok(job) => Some(job),
-                Err(TryRecvError::Empty) => None,
-                Err(TryRecvError::Disconnected) => return,
-            },
-            true => match jobs.recv_timeout(Paced::poll()) {
-                Ok(job) => Some(job),
-                Err(RecvTimeoutError::Timeout) => None,
-                Err(RecvTimeoutError::Disconnected) => return,
+        let job = match deferred.take() {
+            Some(job) => Some(job),
+            None => match idle {
+                false => match jobs.try_recv() {
+                    Ok(job) => Some(job),
+                    Err(TryRecvError::Empty) => None,
+                    Err(TryRecvError::Disconnected) => return,
+                },
+                true => match jobs.recv_timeout(Paced::poll()) {
+                    Ok(job) => Some(job),
+                    Err(RecvTimeoutError::Timeout) => None,
+                    Err(RecvTimeoutError::Disconnected) => return,
+                },
             },
         };
 
@@ -871,6 +957,24 @@ fn audio_loop<F: Fetch>(
         }
 
         if let Some(job) = job {
+            let job = match job {
+                Job::Rate(mut latest_speed, mut latest_pitch) => {
+                    while let Ok(next) = jobs.try_recv() {
+                        match next {
+                            Job::Rate(speed, pitch) => {
+                                latest_speed = speed;
+                                latest_pitch = pitch;
+                            }
+                            other => {
+                                deferred = Some(other);
+                                break;
+                            }
+                        }
+                    }
+                    Job::Rate(latest_speed, latest_pitch)
+                }
+                other => other,
+            };
             match job {
                 Job::Play {
                     id,
@@ -882,6 +986,9 @@ fn audio_loop<F: Fetch>(
                     joining = None;
                     written = 0;
                     current = Playing::open(fetch.as_ref(), &id, loaded, at, 0, normalise);
+                    if let Some(held) = &mut current {
+                        held.set_rate(speed, pitch);
+                    }
                     if let Some(held) = &current
                         && paced.fit(held.rate).is_err()
                     {
@@ -950,7 +1057,10 @@ fn audio_loop<F: Fetch>(
                             let (id, loaded) = (held.id.clone(), held.loaded.clone());
                             match Playing::open(fetch.as_ref(), &id, loaded, position, 0, normalise)
                             {
-                                Some(fresh) => current = Some(fresh),
+                                Some(mut fresh) => {
+                                    fresh.set_rate(speed, pitch);
+                                    current = Some(fresh);
+                                }
                                 None => {
                                     log::warn!("playback: cannot seek {id}");
                                     continue;
@@ -971,6 +1081,26 @@ fn audio_loop<F: Fetch>(
                     cue.arm();
                 }
                 Job::Gain(level) => paced.set_volume(level),
+                Job::Rate(wanted_speed, wanted_pitch) => {
+                    let next_speed = wanted_speed.clamp(0.5, 2.);
+                    let next_pitch = wanted_pitch.clamp(-12., 12.);
+                    let changed = speed != next_speed || pitch != next_pitch;
+                    speed = next_speed;
+                    pitch = next_pitch;
+
+                    // Keep the SoundTouch processor running so changes blend into the audio.
+                    // Only this engine shortens its queue; Spotify's sink keeps its 26 chunks.
+                    paced.set_queue_limit(RATE_QUEUE_CHUNKS);
+                    if let Some(held) = &mut current {
+                        if changed {
+                            let position = held.mark().at(&cue);
+                            held.base = position;
+                            held.offset = cue.played();
+                            held.set_rate(speed, pitch);
+                        }
+                        heard = Some(held.mark());
+                    }
+                }
             }
             continue;
         }
@@ -995,7 +1125,11 @@ fn audio_loop<F: Fetch>(
                     Duration::ZERO,
                     written,
                     normalise,
-                );
+                )
+                .map(|mut fresh| {
+                    fresh.set_rate(speed, pitch);
+                    fresh
+                });
                 current.as_ref().map(|_| (id, duration))
             });
             joins

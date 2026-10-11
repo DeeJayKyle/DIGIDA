@@ -1,6 +1,7 @@
 //! librespot's `Sink` over the shared paced output. librespot decodes on its own thread, so
 //! every write here is finished audio; the pacing and the device watch live in `crate::sink`.
 
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use librespot_playback::audio_backend::{Sink, SinkError, SinkResult};
@@ -12,16 +13,53 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::audio::Chain;
 use crate::sink::{Cue, Paced, packet, watch_for_output};
 
+const DEFAULT_QUEUE_CHUNKS: usize = 26;
+const RATE_QUEUE_CHUNKS: usize = 8;
+const PROCESS_FRAMES: usize = 4096;
+
+/// The current tempo and pitch, shared between the playback engine and its sink.
+pub(crate) type RateControl = Arc<Mutex<(f32, f32)>>;
+
 pub struct OutputSink {
     paced: Paced,
+    cue: Cue,
+    rate: RateControl,
+    processor: soundtouch::SoundTouch,
+    speed: f32,
+    pitch: f32,
+    processed_active: bool,
+    generation: u32,
+    scratch: Vec<f32>,
 }
 
 impl OutputSink {
     /// The sink librespot's player builder asks for. Without an output device it gets a silent
     /// one, so playback state still moves.
-    pub fn boxed(cue: Cue, chain: Chain, changed: UnboundedSender<()>) -> Box<dyn Sink> {
+    pub fn boxed(
+        cue: Cue,
+        chain: Chain,
+        changed: UnboundedSender<()>,
+        rate: RateControl,
+    ) -> Box<dyn Sink> {
+        let generation = cue.generation();
         match Paced::open(cue.clone(), chain, changed.clone()) {
-            Ok(paced) => Box::new(Self { paced }),
+            Ok(paced) => {
+                let mut processor = soundtouch::SoundTouch::new();
+                processor
+                    .set_channels(NUM_CHANNELS as u32)
+                    .set_sample_rate(SAMPLE_RATE);
+                Box::new(Self {
+                    paced,
+                    cue,
+                    rate,
+                    processor,
+                    speed: 1.,
+                    pitch: 0.,
+                    processed_active: false,
+                    generation,
+                    scratch: vec![0.; PROCESS_FRAMES * NUM_CHANNELS as usize],
+                })
+            }
             Err(error) => {
                 log::error!("sink: cannot open an output device: {error:#}");
                 watch_for_output(changed);
@@ -51,12 +89,64 @@ impl Sink for OutputSink {
             .samples()
             .map_err(|error| SinkError::OnWrite(error.to_string()))?;
         let samples = converter.f64_to_f32(samples);
-        let Some(samples) = packet(&samples, NUM_CHANNELS as u16, SAMPLE_RATE) else {
+        let generation = self.cue.generation();
+        if generation != self.generation {
+            self.processor.clear();
+            self.generation = generation;
+        }
+        if self.cue.cleared() {
+            return Ok(());
+        }
+        let (speed, pitch) = *self.rate.lock().unwrap_or_else(PoisonError::into_inner);
+        if speed != self.speed || pitch != self.pitch {
+            self.speed = speed.clamp(0.5, 2.);
+            self.pitch = pitch.clamp(-12., 12.);
+            self.processed_active |= self.speed != 1. || self.pitch != 0.;
+            self.processor
+                .set_tempo(f64::from(self.speed))
+                .set_pitch(2_f64.powf(f64::from(self.pitch) / 12.));
+        }
+        self.paced.set_queue_limit(match self.processed_active {
+            true => RATE_QUEUE_CHUNKS,
+            false => DEFAULT_QUEUE_CHUNKS,
+        });
+
+        if self.processed_active {
+            let channels = NUM_CHANNELS as usize;
+            self.processor
+                .put_samples(&samples, samples.len() / channels);
+            let mut processed = Vec::new();
+            loop {
+                let frames = self
+                    .processor
+                    .receive_samples(&mut self.scratch, PROCESS_FRAMES);
+                if frames == 0 {
+                    break;
+                }
+                processed.extend_from_slice(&self.scratch[..frames * channels]);
+            }
+            self.write_samples(&processed)?;
+        } else {
+            self.write_samples(&samples)?;
+        }
+
+        self.paced
+            .drain()
+            .map_err(|error| SinkError::OnWrite(error.to_string()))
+    }
+}
+
+impl OutputSink {
+    /// Queues interleaved samples without blocking the librespot audio callback.
+    fn write_samples(&mut self, samples: &[f32]) -> SinkResult<()> {
+        if samples.is_empty() {
+            return Ok(());
+        }
+        let Some(samples) = packet(samples, NUM_CHANNELS as u16, SAMPLE_RATE) else {
             return Ok(());
         };
         self.paced
             .write(samples)
-            .and_then(|()| self.paced.drain())
             .map_err(|error| SinkError::OnWrite(error.to_string()))
     }
 }

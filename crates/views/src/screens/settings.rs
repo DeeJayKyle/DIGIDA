@@ -163,6 +163,7 @@ enum Slot {
     AdaptiveMenu,
     Normalisation,
     Gapless,
+    PlaybackRateControls,
     Sleep,
     StayAwake,
     Widevine,
@@ -619,6 +620,10 @@ impl SettingsView {
                     slots.push(Slot::EqualizerBands);
                 }
                 slots.extend([Slot::Title("settings-group-lyrics"), Slot::LyricsProviders]);
+                slots.extend([
+                    Slot::Title("settings-group-playback"),
+                    Slot::PlaybackRateControls,
+                ]);
                 if self
                     .settings
                     .read(cx)
@@ -763,6 +768,10 @@ impl SettingsView {
                 t!("settings-normalisation-detail"),
             ),
             Slot::Gapless => (t!("settings-gapless"), t!("settings-gapless-detail")),
+            Slot::PlaybackRateControls => (
+                t!("settings-playback-rate-controls"),
+                t!("settings-playback-rate-controls-detail"),
+            ),
             Slot::Sleep => (t!("settings-sleep"), t!("settings-sleep-detail")),
             Slot::StayAwake => (t!("settings-stay-awake"), t!("settings-stay-awake-detail")),
             Slot::Widevine => {
@@ -974,6 +983,7 @@ impl SettingsView {
             Slot::AdaptiveMenu => self.adaptive_menu_row(cx).element,
             Slot::Normalisation => self.playback_row(cx).element,
             Slot::Gapless => self.gapless_row(cx).element,
+            Slot::PlaybackRateControls => self.playback_rate_controls_row(cx).element,
             Slot::Sleep => self.sleep_row(cx).element,
             Slot::StayAwake => self.stay_awake_row(cx).element,
             Slot::Widevine => self.widevine_row(cx).element,
@@ -2151,6 +2161,28 @@ impl SettingsView {
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.playback
                         .update(cx, |playback, cx| playback.set_normalisation(!on, cx));
+                }))
+                .into_any_element(),
+        )
+    }
+
+    fn playback_rate_controls_row(&self, cx: &mut Context<Self>) -> Setting {
+        let theme = *cx.theme();
+        let on = self.settings.read(cx).playback_rate_controls();
+        self.row(
+            t!("settings-playback-rate-controls"),
+            t!("settings-playback-rate-controls-detail"),
+            theme.muted_foreground,
+            theme.text(Text::Small),
+            Switch::new("playback-rate-controls", on)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if on {
+                        this.playback
+                            .update(cx, |playback, cx| playback.set_speed_pitch(1., 0., cx));
+                    }
+                    this.settings.update(cx, |settings, cx| {
+                        settings.set_playback_rate_controls(!on, cx)
+                    });
                 }))
                 .into_any_element(),
         )

@@ -144,6 +144,7 @@ struct Preloaded {
 struct LiveClock {
     base: Duration,
     since: Option<Instant>,
+    rate: f64,
     /// Seconds still to fold in from the last report, negative when the clock was ahead.
     correction: f64,
     /// Seconds over which the correction is folded in.
@@ -155,6 +156,7 @@ impl LiveClock {
         Self {
             base: Duration::ZERO,
             since: None,
+            rate: 1.,
             correction: 0.,
             settle: CLOCK_SETTLE.as_secs_f64(),
         }
@@ -164,6 +166,17 @@ impl LiveClock {
     fn reset(&mut self, at: Duration, running: bool) {
         self.base = at;
         self.since = running.then(Instant::now);
+        self.correction = 0.;
+        self.settle = CLOCK_SETTLE.as_secs_f64();
+    }
+
+    /// Changes the rate of the track position while keeping its current value continuous.
+    fn set_rate(&mut self, rate: f32) {
+        let now = Instant::now();
+        let current = self.at(now);
+        self.base = current;
+        self.since = self.since.map(|_| now);
+        self.rate = f64::from(rate.clamp(0.5, 2.));
         self.correction = 0.;
         self.settle = CLOCK_SETTLE.as_secs_f64();
     }
@@ -193,7 +206,7 @@ impl LiveClock {
         };
         let elapsed = now.saturating_duration_since(since).as_secs_f64();
         let blend = (elapsed / self.settle).clamp(0., 1.);
-        shifted(self.base, elapsed + self.correction * blend)
+        shifted(self.base, elapsed * self.rate + self.correction * blend)
     }
 }
 
@@ -368,6 +381,9 @@ pub struct Playback {
     level: f32,
     normalisation: bool,
     gapless: bool,
+    rate_controls_available: bool,
+    speed: f32,
+    pitch: f32,
     /// Shared with every engine started here, so a change reaches the output without a restart.
     equalizer: Equalizer,
     repeat: Repeat,
@@ -440,6 +456,11 @@ impl Playback {
     ) -> Self {
         cx.subscribe(&session, |this, session, event, cx| match event {
             SessionEvent::SignedIn => {
+                this.set_rate_provider({
+                    let session = session.read(cx);
+                    session.authenticated()
+                        && matches!(session.provider_slug(), Some("youtube" | "spotify"))
+                });
                 let Some(playback) = session.read(cx).playback() else {
                     return;
                 };
@@ -447,12 +468,20 @@ impl Playback {
                 this.adopt(cx);
             }
             SessionEvent::Reconnected => {
+                this.set_rate_provider({
+                    let session = session.read(cx);
+                    session.authenticated()
+                        && matches!(session.provider_slug(), Some("youtube" | "spotify"))
+                });
                 let Some(playback) = session.read(cx).playback() else {
                     return;
                 };
                 this.rebind(playback, cx);
             }
-            SessionEvent::SignedOut => this.teardown(cx),
+            SessionEvent::SignedOut => {
+                this.set_rate_provider(false);
+                this.teardown(cx);
+            }
             SessionEvent::LocalChanged => {
                 if this.local_engine.is_none()
                     && let Some(playback) = session.read(cx).local_playback()
@@ -491,6 +520,9 @@ impl Playback {
             level,
             normalisation,
             gapless,
+            rate_controls_available: false,
+            speed: 1.,
+            pitch: 0.,
             equalizer,
             repeat,
             radio,
@@ -1980,13 +2012,22 @@ impl Playback {
 
     /// How far through the track `position` is, from 0 to 1.
     pub fn progress(&self) -> f32 {
-        let Some(total) = self.track.as_ref().map(|track| track.duration) else {
+        let Some(total) = self
+            .track
+            .as_ref()
+            .map(|track| track.duration)
+            .filter(|total| !total.is_zero())
+        else {
             return 0.;
         };
-        if total.is_zero() {
-            return 0.;
-        }
-        (self.position.as_secs_f32() / total.as_secs_f32()).clamp(0., 1.)
+        (self.live_position().as_secs_f32() / total.as_secs_f32()).clamp(0., 1.)
+    }
+
+    /// The current track's duration at the selected playback speed. Pitch is independent.
+    pub fn duration(&self) -> Option<Duration> {
+        let track = self.track.as_ref()?;
+        let factor = self.speed.clamp(0.5, 2.);
+        Some(track.duration.div_f64(f64::from(factor)))
     }
 
     pub fn is_loading(&self) -> bool {
@@ -2004,6 +2045,44 @@ impl Playback {
 
     pub fn volume(&self) -> f32 {
         self.level
+    }
+
+    pub fn rate_controls_available(&self) -> bool {
+        self.rate_controls_available
+    }
+
+    pub fn speed(&self) -> f32 {
+        self.speed
+    }
+
+    pub fn pitch(&self) -> f32 {
+        self.pitch
+    }
+
+    /// Applies speed and pitch controls to the active provider's audio output.
+    pub fn set_speed_pitch(&mut self, speed: f32, pitch: f32, cx: &mut Context<Self>) {
+        if !self.rate_controls_available {
+            return;
+        }
+        self.speed = speed.clamp(0.5, 2.);
+        self.pitch = pitch.clamp(-12., 12.);
+        self.clock.set_rate(self.speed);
+        if let Some(engine) = self.engine.as_ref() {
+            engine.set_speed_pitch(self.speed, self.pitch);
+        }
+        cx.notify();
+    }
+
+    fn set_rate_provider(&mut self, available: bool) {
+        self.rate_controls_available = available;
+        if !available {
+            self.speed = 1.;
+            self.pitch = 0.;
+            self.clock.set_rate(1.);
+            if let Some(engine) = self.engine.as_ref() {
+                engine.set_speed_pitch(1., 0.);
+            }
+        }
     }
 
     pub fn set_volume(&mut self, level: f32, cx: &mut Context<Self>) {
@@ -2186,6 +2265,11 @@ impl Playback {
 
         self.listen(events, false, cx);
         self.engine = Some(engine);
+        if self.rate_controls_available {
+            if let Some(engine) = self.engine.as_ref() {
+                engine.set_speed_pitch(self.speed, self.pitch);
+            }
+        }
         self.refused = None;
         if !self.local_active() {
             self.state = PlaybackState::Idle;
@@ -2613,6 +2697,7 @@ mod tests {
         let mut clock = LiveClock {
             base: Duration::from_secs(10),
             since: Some(began),
+            rate: 1.,
             correction: 0.,
             settle: 1.,
         };
@@ -2631,6 +2716,7 @@ mod tests {
         let mut clock = LiveClock {
             base: Duration::from_secs(10),
             since: Some(began),
+            rate: 1.,
             correction: 0.,
             settle: 1.,
         };

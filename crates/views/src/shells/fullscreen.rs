@@ -4,8 +4,8 @@ use std::time::{Duration, Instant};
 
 use gpui::prelude::*;
 use gpui::{
-    AnyView, App, Bounds, ClickEvent, Context, Entity, FocusHandle, FontWeight, KeyDownEvent,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render,
+    AnyElement, AnyView, App, Bounds, ClickEvent, Context, Entity, FocusHandle, FontWeight,
+    KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render,
     ScrollWheelEvent, SharedString, SpringState, Task, TextShadow,
 };
 use gpui::{Window, canvas, deferred, div, phi, px, relative};
@@ -14,7 +14,7 @@ use input::{ToggleFullscreen, ToggleWindowFullscreen, WORKSPACE_CONTEXT};
 use router::{Destination, navigate};
 use state::{AppSettings, Cover, FullscreenControlsAutohide, Playback, Queue, SideTab, Sonora};
 use ui::{
-    ActiveTheme as _, Artwork, Button, ExplicitBadge, InlineLink, InlineLinks, Motion,
+    ActiveTheme as _, Artwork, Button, ExplicitBadge, InlineLink, InlineLinks, Menu, Motion,
     Motioned as _, Popup, Room, Scrollbar, Scrubber, ScrubberState, Springs, TabBar, Text,
     Visualizer, clock, glass, snapped,
 };
@@ -51,6 +51,7 @@ const PILL_GAP: f32 = 2.;
 const SEEK_MAX: f32 = 420.;
 const VOLUME_RISE: f32 = 132.;
 const VOLUME_ZONE: f32 = 14.;
+const RATE_POPUP_WIDTH: f32 = 192.;
 const CLOCK_SHORT: f32 = 3.4;
 const CLOCK_LONG: f32 = 5.4;
 const VISUALIZER_MIN: f32 = 160.;
@@ -82,6 +83,9 @@ pub struct FullscreenView {
     pending: Option<f32>,
     over_seek: Option<f32>,
     volume: ScrubberState,
+    rate_speed: ScrubberState,
+    rate_pitch: ScrubberState,
+    rate_popup: Option<Point<Pixels>>,
     over_volume: bool,
     over_zone: bool,
     over_panel: bool,
@@ -134,6 +138,9 @@ impl FullscreenView {
             pending: None,
             over_seek: None,
             volume: ScrubberState::new("fullscreen-volume-slider"),
+            rate_speed: ScrubberState::new("fullscreen-rate-speed"),
+            rate_pitch: ScrubberState::new("fullscreen-rate-pitch"),
+            rate_popup: None,
             over_volume: false,
             over_zone: false,
             over_panel: false,
@@ -839,6 +846,124 @@ impl FullscreenView {
             )
     }
 
+    fn rate_panel(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = *cx.theme();
+        let playback = self.playback.read(cx);
+        let speed = playback.speed();
+        let pitch = playback.pitch();
+        let speed_playback = self.playback.clone();
+        let pitch_playback = self.playback.clone();
+        let reset_playback = self.playback.clone();
+
+        div()
+            .w(px(RATE_POPUP_WIDTH))
+            .flex()
+            .flex_col()
+            .gap_2()
+            .p_2()
+            .rounded_md()
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.popover)
+            .text_color(theme.popover_foreground)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .text_size(theme.text(Text::Small))
+                    .child(t!("player-rate-controls"))
+                    .child(
+                        Button::new("fullscreen-rate-reset")
+                            .ghost()
+                            .small()
+                            .icon("icons/refresh-cw.svg")
+                            .tooltip("player-rate-reset")
+                            .on_click(move |_, _, cx| {
+                                reset_playback.update(cx, |playback, cx| {
+                                    playback.set_speed_pitch(1., 0., cx)
+                                });
+                            }),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_0p5()
+                    .child(
+                        div()
+                            .flex()
+                            .justify_between()
+                            .text_size(theme.text(Text::Tiny))
+                            .child(t!("player-speed"))
+                            .child(t!("player-speed-value", value = format!("{speed:.2}"))),
+                    )
+                    .child(
+                        Scrubber::new(&self.rate_speed, (speed - 0.5) / 1.5)
+                            .h(px(16.))
+                            .colors(
+                                theme.progress_bar,
+                                theme.muted_foreground.opacity(0.3),
+                                theme.foreground,
+                            )
+                            .on_move(move |fraction, _, cx| {
+                                let speed = 0.5 + fraction * 1.5;
+                                speed_playback.update(cx, |playback, cx| {
+                                    playback.set_speed_pitch(speed, playback.pitch(), cx)
+                                });
+                            }),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_0p5()
+                    .child(
+                        div()
+                            .flex()
+                            .justify_between()
+                            .text_size(theme.text(Text::Tiny))
+                            .child(t!("player-pitch"))
+                            .child(t!("player-pitch-value", value = format!("{pitch:+.0}"))),
+                    )
+                    .child(
+                        Scrubber::new(&self.rate_pitch, (pitch + 12.) / 24.)
+                            .h(px(16.))
+                            .colors(
+                                theme.progress_bar,
+                                theme.muted_foreground.opacity(0.3),
+                                theme.foreground,
+                            )
+                            .on_move(move |fraction, _, cx| {
+                                let pitch = -12. + fraction * 24.;
+                                pitch_playback.update(cx, |playback, cx| {
+                                    playback.set_speed_pitch(playback.speed(), pitch, cx)
+                                });
+                            }),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn rate_menu(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let position = self.rate_popup.filter(|_| {
+            self.settings.read(cx).playback_rate_controls()
+                && self.playback.read(cx).rate_controls_available()
+        })?;
+        Some(
+            Popup::new(
+                position,
+                Menu::new("fullscreen-rate-menu").header(self.rate_panel(cx)),
+            )
+            .on_close(cx.listener(|this, _, _, cx| {
+                this.rate_popup = None;
+                cx.notify();
+            })),
+        )
+    }
+
     fn sound(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = *cx.theme();
         let frosted = ambient::shown(cx);
@@ -849,12 +974,32 @@ impl FullscreenView {
         let restore = self.muted.unwrap_or(0.7);
         let span = theme.metrics.control_small + zone * 2.;
         let bubble = (self.over_panel || self.volume_held).then(|| (level, percent(level)));
+        let show_rate = self.settings.read(cx).playback_rate_controls()
+            && self.playback.read(cx).rate_controls_available();
 
         div()
             .relative()
             .flex()
             .flex_none()
             .on_scroll_wheel(cx.listener(Self::turn_volume))
+            .when(show_rate, |this| {
+                this.child(
+                    Button::new("fullscreen-rate")
+                        .ghost()
+                        .small()
+                        .icon("icons/sliders-horizontal.svg")
+                        .tooltip("player-rate-controls")
+                        .selected(self.rate_popup.is_some())
+                        .tint(match self.rate_popup.is_some() {
+                            true => theme.foreground,
+                            false => theme.muted_foreground,
+                        })
+                        .on_click(cx.listener(|this, event: &ClickEvent, _, cx| {
+                            this.rate_popup = Some(event.position());
+                            cx.notify();
+                        })),
+                )
+            })
             .child(
                 div()
                     .id("fullscreen-volume-hover")
@@ -1262,6 +1407,7 @@ impl Render for FullscreenView {
             })
             .when(idle < 1., |this| this.child(self.leave(idle, window, cx)))
             .children(self.menu(cx))
+            .children(self.rate_menu(cx))
     }
 }
 

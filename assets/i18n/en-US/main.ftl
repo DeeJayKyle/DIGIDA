@@ -240,6 +240,12 @@ player-previous = Previous track
 player-next = Next track
 player-fullscreen = Fullscreen
 player-fullscreen-leave = Leave fullscreen
+player-rate-controls = Speed and pitch
+player-rate-reset = Reset speed and pitch
+player-speed = Speed
+player-pitch = Pitch
+player-speed-value = { $value }×
+player-pitch-value = { $value } st
 fullscreen-artwork = Artwork
 
 # filters
@@ -594,6 +600,9 @@ settings-fullscreen-controls-autohide-always-hidden = Always hidden
 settings-fullscreen-controls-autohide-always-shown = Always shown
 settings-normalisation = Normalize loudness
 settings-normalisation-detail = Keeps tracks at a consistent volume
+settings-group-playback = Playback
+settings-playback-rate-controls = YouTube Music speed and pitch
+settings-playback-rate-controls-detail = Show speed and pitch controls beside the lyrics button when YouTube Music is connected
 settings-gapless = Gapless playback
 settings-gapless-detail = Runs one track into the next without a pause, the way an album was sequenced
 settings-sleep = Sleep timer

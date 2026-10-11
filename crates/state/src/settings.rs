@@ -274,6 +274,7 @@ struct Held {
 struct Values {
     normalisation: bool,
     gapless: bool,
+    playback_rate_controls: bool,
     equalizer: bool,
     /// Per band gains in decibels, lowest band first. Kept even while `equalizer` is off, so
     /// turning it back on restores the curve.
@@ -423,6 +424,7 @@ impl Default for Values {
         Self {
             normalisation: false,
             gapless: true,
+            playback_rate_controls: true,
             equalizer: false,
             equalizer_bands: vec![0.; equalizer::BANDS],
             sleep_timer: false,
@@ -790,6 +792,16 @@ impl AppSettings {
 
     pub fn lyrics_providers(&self) -> &[String] {
         &self.values.lyrics_providers
+    }
+
+    /// Whether the player bar shows YouTube Music speed and pitch controls.
+    pub fn playback_rate_controls(&self) -> bool {
+        self.values.playback_rate_controls
+    }
+
+    pub fn set_playback_rate_controls(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        self.values.playback_rate_controls = enabled;
+        self.schedule_save(cx);
     }
 
     pub fn lyrics_provider_enabled(&self, provider: &str) -> bool {

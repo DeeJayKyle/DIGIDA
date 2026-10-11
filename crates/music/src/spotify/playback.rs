@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use anyhow::{Context as _, Result};
@@ -7,12 +7,13 @@ use librespot_core::{Session, SpotifyUri};
 use librespot_playback::config::{Bitrate, PlayerConfig};
 use librespot_playback::mixer::NoOpVolume;
 use librespot_playback::player::{Player, PlayerEvent};
+use librespot_playback::{NUM_CHANNELS, SAMPLE_RATE};
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
 use crate::audio::{Chain, Volume};
 use crate::sink::Cue;
 use crate::spectrum::Spectrum;
-use crate::spotify::sink::OutputSink;
+use crate::spotify::sink::{OutputSink, RateControl};
 use crate::{
     PlaybackConfig, PlaybackEvent, PlaybackEvents, PlaybackFactory, Player as MusicPlayer,
 };
@@ -35,6 +36,36 @@ pub struct Events {
     /// Position reports seen while the cue refuses writes. A seek or load that took keeps the
     /// player thread busy, so a run of them means it never left the old position.
     stale: u8,
+    rate: RateControl,
+    heard: Option<HeardPosition>,
+}
+
+/// Tracks the position that has reached the speakers, accounting for samples already queued.
+struct HeardPosition {
+    at: Duration,
+    played: u64,
+    speed: f32,
+}
+
+impl HeardPosition {
+    /// Advances from samples consumed by the output, rather than librespot's decode head.
+    fn advance(&mut self, cue: &Cue, speed: f32) -> Duration {
+        let played = cue.played();
+        let frames = played.saturating_sub(self.played) / u64::from(NUM_CHANNELS);
+        self.at +=
+            Duration::from_secs_f64(frames as f64 / f64::from(SAMPLE_RATE) * f64::from(self.speed));
+        self.played = played;
+        self.speed = speed;
+        self.at
+    }
+}
+
+/// Reads the selected tempo without holding the control lock during audio processing.
+fn speed(rate: &RateControl) -> f32 {
+    rate.lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .0
+        .clamp(0.5, 2.)
 }
 
 #[async_trait]
@@ -62,7 +93,15 @@ impl PlaybackEvents for Events {
                             }
                             return Some(event);
                         }
-                        PlaybackEvent::Position { .. } | PlaybackEvent::Length { .. } => {
+                        PlaybackEvent::Position { id, at } => {
+                            let at = self
+                                .heard
+                                .as_mut()
+                                .map(|heard| heard.advance(&self.cue, speed(&self.rate)))
+                                .unwrap_or(at);
+                            return Some(PlaybackEvent::Position { id, at });
+                        }
+                        PlaybackEvent::Length { .. } => {
                             return Some(event);
                         }
                         event => {
@@ -75,6 +114,16 @@ impl PlaybackEvents for Events {
                 written = self.written.recv() => {
                     written?;
                     if let Some(event) = self.held.take() {
+                        let at = match &event {
+                            PlaybackEvent::Playing { at, .. }
+                            | PlaybackEvent::Seeked { at, .. } => Some(*at),
+                            _ => None,
+                        };
+                        self.heard = at.map(|at| HeardPosition {
+                            at,
+                            played: self.cue.played(),
+                            speed: speed(&self.rate),
+                        });
                         return Some(event);
                     }
                 }
@@ -111,11 +160,13 @@ pub struct Engine {
     cue: Cue,
     spectrum: Spectrum,
     gapless: bool,
+    rate: RateControl,
 }
 
 impl Engine {
     fn start(session: Session, config: PlaybackConfig) -> (Self, Events) {
         let volume = Volume::new(config.gain);
+        let rate: RateControl = Arc::new(Mutex::new((1., 0.)));
         let (cue, written) = Cue::new();
         let spectrum = Spectrum::new();
 
@@ -134,8 +185,9 @@ impl Engine {
             spectrum: spectrum.clone(),
         };
         let (output_tx, output_rx) = unbounded_channel();
+        let sink_rate = rate.clone();
         let player = Player::new(player_config, session, Box::new(NoOpVolume), move || {
-            OutputSink::boxed(sink_cue, chain, output_tx.clone())
+            OutputSink::boxed(sink_cue, chain, output_tx.clone(), sink_rate.clone())
         });
 
         let events = Events {
@@ -145,6 +197,8 @@ impl Engine {
             written,
             held: None,
             stale: 0,
+            rate: rate.clone(),
+            heard: None,
         };
         let engine = Self {
             player,
@@ -152,6 +206,7 @@ impl Engine {
             cue,
             spectrum,
             gapless: config.gapless,
+            rate,
         };
         (engine, events)
     }
@@ -228,6 +283,11 @@ impl MusicPlayer for Engine {
 
     fn set_gain(&self, gain: f32) {
         self.set_gain(gain);
+    }
+
+    fn set_speed_pitch(&self, speed: f32, pitch_semitones: f32) {
+        *self.rate.lock().unwrap_or_else(PoisonError::into_inner) =
+            (speed.clamp(0.5, 2.), pitch_semitones.clamp(-12., 12.));
     }
 
     fn spectrum(&self) -> Option<Spectrum> {
