@@ -618,15 +618,12 @@ impl SettingsView {
                 if self.drm.read(cx).shown(cx) {
                     slots.push(Slot::Widevine);
                 }
-                slots.extend([
-                    Slot::Title("settings-group-equalizer"),
-                    Slot::Equalizer,
-                    Slot::Crossfade,
-                ]);
+                slots.extend([Slot::Title("settings-group-equalizer"), Slot::Equalizer]);
                 if self.playback.read(cx).equalizer() {
                     slots.push(Slot::EqualizerPreset);
                     slots.push(Slot::EqualizerBands);
                 }
+                slots.push(Slot::Crossfade);
                 slots.extend([Slot::Title("settings-group-lyrics"), Slot::LyricsProviders]);
                 if self
                     .settings
@@ -2297,9 +2294,9 @@ impl SettingsView {
         let control = div()
             .flex()
             .items_center()
-            .gap_2()
+            .gap_8()
             .child(
-                div().w(theme.metrics.cover).child(
+                div().flex().w(theme.metrics.cover).px_2().child(
                     Scrubber::new(&self.crossfade, fraction)
                         .colors(theme.progress_bar, theme.muted, theme.foreground)
                         .on_move(cx.listener(move |this, fraction: &f32, _, cx| {
