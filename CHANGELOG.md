@@ -7,6 +7,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- add a customizable crossfade between tracks
+
 ## [0.42.2] - 2026-10-07
 
 ### Added

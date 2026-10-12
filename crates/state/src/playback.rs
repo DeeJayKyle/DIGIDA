@@ -368,6 +368,7 @@ pub struct Playback {
     level: f32,
     normalisation: bool,
     gapless: bool,
+    crossfade_milliseconds: u64,
     /// Shared with every engine started here, so a change reaches the output without a restart.
     equalizer: Equalizer,
     repeat: Repeat,
@@ -471,6 +472,7 @@ impl Playback {
         let level = settings.read(cx).volume();
         let normalisation = settings.read(cx).normalisation();
         let gapless = settings.read(cx).gapless();
+        let crossfade_milliseconds = settings.read(cx).crossfade_milliseconds();
         let equalizer = Equalizer::new(
             settings.read(cx).equalizer(),
             &settings.read(cx).equalizer_gains(),
@@ -491,6 +493,7 @@ impl Playback {
             level,
             normalisation,
             gapless,
+            crossfade_milliseconds,
             equalizer,
             repeat,
             radio,
@@ -2028,6 +2031,28 @@ impl Playback {
         self.gapless
     }
 
+    pub fn crossfade_milliseconds(&self) -> u64 {
+        self.crossfade_milliseconds
+    }
+
+    pub fn set_crossfade_milliseconds(&mut self, milliseconds: u64, cx: &mut Context<Self>) {
+        let milliseconds = milliseconds.min(12_000);
+        if self.crossfade_milliseconds == milliseconds {
+            return;
+        }
+        self.crossfade_milliseconds = milliseconds;
+        self.settings.update(cx, |settings, cx| {
+            settings.set_crossfade_milliseconds(milliseconds, cx)
+        });
+        if let Some(engine) = self.engine.as_ref() {
+            engine.set_crossfade(Duration::from_millis(milliseconds));
+        }
+        if let Some(engine) = self.local_engine.as_ref() {
+            engine.set_crossfade(Duration::from_millis(milliseconds));
+        }
+        cx.notify();
+    }
+
     pub fn equalizer(&self) -> bool {
         self.equalizer.enabled()
     }
@@ -2178,6 +2203,7 @@ impl Playback {
         let config = PlaybackConfig {
             normalisation: self.normalisation,
             gapless: self.gapless,
+            crossfade: Duration::from_millis(self.crossfade_milliseconds),
             position_interval: POSITION_INTERVAL,
             gain: gain(self.level),
             equalizer: self.equalizer.clone(),
@@ -2200,6 +2226,7 @@ impl Playback {
         let config = PlaybackConfig {
             normalisation: self.normalisation,
             gapless: self.gapless,
+            crossfade: Duration::from_millis(self.crossfade_milliseconds),
             position_interval: POSITION_INTERVAL,
             gain: gain(self.level),
             equalizer: self.equalizer.clone(),
