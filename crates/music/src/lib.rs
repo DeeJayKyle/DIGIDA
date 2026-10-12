@@ -339,6 +339,7 @@ pub trait LyricsProvider: Send + Sync {
 pub struct PlaybackConfig {
     pub normalisation: bool,
     pub gapless: bool,
+    pub crossfade: Duration,
     pub position_interval: Duration,
     pub gain: f32,
     pub equalizer: Equalizer,
@@ -434,6 +435,9 @@ pub trait Player: Send + Sync {
     /// `Seeked` event follows once audio from there reaches the output.
     fn seek(&self, position: Duration);
     fn set_gain(&self, gain: f32);
+
+    /// Changes the overlap used when the next queued track is ready.
+    fn set_crossfade(&self, _duration: Duration) {}
 
     fn spectrum(&self) -> Option<Spectrum> {
         None

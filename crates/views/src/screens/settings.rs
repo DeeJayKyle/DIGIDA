@@ -74,6 +74,8 @@ const SLEEP: &str = "sleep";
 const EQUALIZER_PRESETS: &str = "equalizer-presets";
 // the step a dragged band snaps to, in decibels
 const EQUALIZER_STEP: f32 = 0.5;
+const CROSSFADE_MAX_MILLISECONDS: u64 = 12_000;
+const CROSSFADE_STEP_MILLISECONDS: u64 = 100;
 const SLEEP_MAX_MINUTES: u64 = 120;
 const SLEEP_MAGNETS: [u64; 4] = [15, 30, 45, 60];
 const SLEEP_MAGNET_WEIGHT: usize = 4;
@@ -167,6 +169,7 @@ enum Slot {
     StayAwake,
     Widevine,
     Equalizer,
+    Crossfade,
     EqualizerPreset,
     EqualizerBands,
     LyricsProviders,
@@ -305,6 +308,7 @@ pub struct SettingsView {
     column: Option<Pixels>,
     scrollbar: Entity<Scrollbar>,
     opacity: ScrubberState,
+    crossfade: ScrubberState,
     sleep: ScrubberState,
     /// One slider per equalizer band, lowest first.
     bands: Vec<ScrubberState>,
@@ -407,6 +411,7 @@ impl SettingsView {
             column: None,
             scrollbar: cx.new(|_| Scrollbar::new(ScrollHandle::new()).watching(me)),
             opacity: ScrubberState::new("opacity"),
+            crossfade: ScrubberState::new("crossfade"),
             sleep: ScrubberState::new("sleep"),
             bands: (0..equalizer::BANDS)
                 .map(|band| ScrubberState::new(format!("equalizer-band-{band}")))
@@ -618,6 +623,7 @@ impl SettingsView {
                     slots.push(Slot::EqualizerPreset);
                     slots.push(Slot::EqualizerBands);
                 }
+                slots.push(Slot::Crossfade);
                 slots.extend([Slot::Title("settings-group-lyrics"), Slot::LyricsProviders]);
                 if self
                     .settings
@@ -770,6 +776,7 @@ impl SettingsView {
                 (t!("settings-widevine"), i18n::lookup(detail, None))
             }
             Slot::Equalizer => (t!("settings-equalizer"), t!("settings-equalizer-detail")),
+            Slot::Crossfade => (t!("settings-crossfade"), t!("settings-crossfade-detail")),
             Slot::EqualizerPreset => (
                 t!("settings-equalizer-preset"),
                 t!("settings-equalizer-preset-detail"),
@@ -978,6 +985,7 @@ impl SettingsView {
             Slot::StayAwake => self.stay_awake_row(cx).element,
             Slot::Widevine => self.widevine_row(cx).element,
             Slot::Equalizer => self.equalizer_row(cx).element,
+            Slot::Crossfade => self.crossfade_row(cx).element,
             Slot::EqualizerPreset => self.equalizer_preset_row(cx).element,
             Slot::EqualizerBands => self.equalizer_bands_row(cx).element,
             Slot::LyricsProviders => self.lyrics_providers_row(cx).element,
@@ -2273,6 +2281,50 @@ impl SettingsView {
                         .update(cx, |playback, cx| playback.set_equalizer(!on, cx));
                 }))
                 .into_any_element(),
+        )
+    }
+
+    fn crossfade_row(&self, cx: &mut Context<Self>) -> Setting {
+        let theme = *cx.theme();
+        let muted = theme.muted_foreground;
+        let small = theme.text(Text::Small);
+        let milliseconds = self.playback.read(cx).crossfade_milliseconds();
+        let fraction = milliseconds as f32 / CROSSFADE_MAX_MILLISECONDS as f32;
+        let value = t!("settings-crossfade-value", milliseconds = milliseconds);
+        let control = div()
+            .flex()
+            .items_center()
+            .gap_8()
+            .child(
+                div().flex().w(theme.metrics.cover).px_2().child(
+                    Scrubber::new(&self.crossfade, fraction)
+                        .colors(theme.progress_bar, theme.muted, theme.foreground)
+                        .on_move(cx.listener(move |this, fraction: &f32, _, cx| {
+                            let milliseconds = (*fraction * CROSSFADE_MAX_MILLISECONDS as f32)
+                                .round() as u64
+                                / CROSSFADE_STEP_MILLISECONDS
+                                * CROSSFADE_STEP_MILLISECONDS;
+                            this.playback.update(cx, |playback, cx| {
+                                playback.set_crossfade_milliseconds(milliseconds, cx)
+                            });
+                        })),
+                ),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .w(theme.metrics.control * 1.5)
+                    .whitespace_nowrap()
+                    .text_right()
+                    .child(value),
+            );
+
+        self.row(
+            t!("settings-crossfade"),
+            t!("settings-crossfade-detail"),
+            muted,
+            small,
+            control.into_any_element(),
         )
     }
 

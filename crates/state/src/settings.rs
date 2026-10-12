@@ -255,6 +255,7 @@ const DEFAULT_SIDEBAR_RIGHT_WIDTH: f32 = 254.;
 const DEFAULT_FONT_SIZE: f32 = 14.;
 const DEFAULT_LYRICS_SCALE: f32 = 1.;
 const DEFAULT_STARTUP: &str = "home";
+const DEFAULT_CROSSFADE_MILLISECONDS: u64 = 0;
 /// "Whatever the platform uses".
 pub const SYSTEM_FONT: &str = "auto";
 
@@ -278,6 +279,7 @@ struct Values {
     /// Per band gains in decibels, lowest band first. Kept even while `equalizer` is off, so
     /// turning it back on restores the curve.
     equalizer_bands: Vec<f32>,
+    crossfade_milliseconds: u64,
     sleep_timer: bool,
     discord_presence: bool,
     discord_name: DiscordName,
@@ -425,6 +427,7 @@ impl Default for Values {
             gapless: true,
             equalizer: false,
             equalizer_bands: vec![0.; equalizer::BANDS],
+            crossfade_milliseconds: DEFAULT_CROSSFADE_MILLISECONDS,
             sleep_timer: false,
             discord_presence: false,
             discord_name: DiscordName::Sonora,
@@ -725,6 +728,10 @@ impl AppSettings {
 
     pub fn equalizer(&self) -> bool {
         self.values.equalizer
+    }
+
+    pub fn crossfade_milliseconds(&self) -> u64 {
+        self.values.crossfade_milliseconds.min(12_000)
     }
 
     /// The stored curve, padded flat or cut to the band count and clamped into range, so a file
@@ -1116,6 +1123,11 @@ impl AppSettings {
 
     pub fn set_equalizer(&mut self, on: bool, cx: &mut Context<Self>) {
         self.values.equalizer = on;
+        self.schedule_save(cx);
+    }
+
+    pub fn set_crossfade_milliseconds(&mut self, milliseconds: u64, cx: &mut Context<Self>) {
+        self.values.crossfade_milliseconds = milliseconds.min(12_000);
         self.schedule_save(cx);
     }
 
