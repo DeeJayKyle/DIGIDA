@@ -26,6 +26,7 @@ pub struct Picker {
     width: Pixels,
     left: bool,
     sticky: bool,
+    upward: bool,
     items: Vec<MenuItem>,
     menu: Option<Menu>,
 }
@@ -49,6 +50,7 @@ impl Picker {
             width: Self::REGULAR,
             left: false,
             sticky: false,
+            upward: false,
             items: Vec::new(),
             menu: None,
         }
@@ -111,6 +113,12 @@ impl Picker {
         self
     }
 
+    /// Opens the menu above the button, for one in a bar at the bottom of the window.
+    pub fn upward(mut self) -> Self {
+        self.upward = true;
+        self
+    }
+
     pub fn item(mut self, item: MenuItem) -> Self {
         self.items.push(item);
         self
@@ -148,6 +156,7 @@ impl RenderOnce for Picker {
             width,
             left,
             sticky,
+            upward,
             items,
             menu,
         } = self;
@@ -182,6 +191,7 @@ impl RenderOnce for Picker {
             .unwrap_or_else(|| Menu::new(SharedString::from(format!("{key}-menu"))).w(width))
             .items(items)
             .top(drop)
+            .when(upward, Menu::upward)
             .when_else(left, |menu| menu.left_0(), |menu| menu.right_0());
 
         let mut popover = Popover::new(key, group)

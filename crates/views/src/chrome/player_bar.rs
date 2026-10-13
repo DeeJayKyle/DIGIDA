@@ -12,8 +12,8 @@ use i18n::t;
 use input::{ToggleFullscreen, ToggleLyrics, ToggleQueue};
 use state::{AppSettings, Playback, Queue, SideTab, Sonora};
 use ui::{
-    Artwork, Button, ExplicitBadge, InlineLink, InlineLinks, Popup, Room, Scrollbar, Scrubber,
-    ScrubberState, clock, tabular,
+    Artwork, Button, ExplicitBadge, InlineLink, InlineLinks, MenuItem, Picker, Popovers, Popup,
+    Room, Scrollbar, Scrubber, ScrubberState, clock, tabular,
 };
 
 use crate::chrome::SidebarRight;
@@ -39,6 +39,7 @@ pub(crate) struct PlayerBar {
     over_volume: Option<f32>,
     volume_held: bool,
     muted: Option<f32>,
+    popovers: Popovers,
 }
 
 impl PlayerBar {
@@ -66,6 +67,7 @@ impl PlayerBar {
             over_volume: None,
             volume_held: false,
             muted: None,
+            popovers: Popovers::default(),
         }
     }
 
@@ -208,11 +210,40 @@ impl PlayerBar {
                 })
         };
 
+        let devices = self.playback.read(cx).devices().to_vec();
+        let elsewhere = devices.iter().any(|device| device.active && !device.local);
+        let playback = self.playback.clone();
+        let picker = (!devices.is_empty()).then(|| {
+            Picker::icon(
+                "player-devices",
+                &self.popovers,
+                "icons/monitor-speaker.svg",
+            )
+            .tooltip_above("player-devices")
+            .upward()
+            .width(Picker::WIDE)
+            .tint(match elsewhere {
+                true => theme.primary,
+                false => theme.muted_foreground,
+            })
+            .items(devices.into_iter().map(move |device| {
+                let playback = playback.clone();
+                let target = device.clone();
+
+                MenuItem::new(SharedString::from(device.id), device.name)
+                    .selected(device.active)
+                    .on_click(move |_, _, cx| {
+                        playback.update(cx, |playback, cx| playback.transfer_to(&target, cx));
+                    })
+            }))
+        });
+
         div()
             .flex()
             .flex_none()
             .items_center()
             .gap_1()
+            .children(picker)
             .child(button(
                 "player-lyrics",
                 "icons/mic-vocal.svg",

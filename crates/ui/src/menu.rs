@@ -494,6 +494,8 @@ pub struct Menu {
     hover_guard: Option<SubmenuState>,
     trigger: Option<Trigger>,
     pressed: Option<Point<Pixels>>,
+    /// Opens above its trigger, for one that sits at the bottom of the window.
+    upward: bool,
 }
 
 impl Menu {
@@ -512,7 +514,13 @@ impl Menu {
             hover_guard: None,
             trigger: None,
             pressed: None,
+            upward: false,
         }
+    }
+
+    pub fn upward(mut self) -> Self {
+        self.upward = true;
+        self
     }
 
     pub fn item(mut self, item: MenuItem) -> Self {
@@ -622,6 +630,7 @@ impl RenderOnce for Menu {
             hover_guard,
             trigger,
             pressed,
+            upward,
         } = self;
 
         if let Some(search) = search.as_ref() {
@@ -976,9 +985,11 @@ impl RenderOnce for Menu {
         let width = overrides.size.width.take();
         let ceiling = overrides.max_size.height.take();
         let right = overrides.inset.left.is_none() && overrides.inset.right.is_some();
-        let corner = match right {
-            true => Anchor::TopRight,
-            false => Anchor::TopLeft,
+        let corner = match (upward, right) {
+            (false, true) => Anchor::TopRight,
+            (false, false) => Anchor::TopLeft,
+            (true, true) => Anchor::BottomRight,
+            (true, false) => Anchor::BottomLeft,
         };
         let perch = trigger
             .as_ref()
@@ -989,7 +1000,10 @@ impl RenderOnce for Menu {
                     false => bounds.left(),
                 };
                 let position = point(x, bounds.top() - TRIGGER_GAP);
-                let offset = point(Pixels::ZERO, bounds.size.height + TRIGGER_GAP + TRIGGER_GAP);
+                let offset = match upward {
+                    true => point(Pixels::ZERO, Pixels::ZERO),
+                    false => point(Pixels::ZERO, bounds.size.height + TRIGGER_GAP + TRIGGER_GAP),
+                };
                 (position, offset)
             });
         let frosting = blurring(cx);

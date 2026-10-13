@@ -362,6 +362,8 @@ pub struct Playback {
     track: Option<Track>,
     engine: Option<Box<dyn Player>>,
     local_engine: Option<Box<dyn Player>>,
+    /// The Spotify Connect devices the streaming engine last reported.
+    devices: Vec<music::Device>,
     session: Entity<Session>,
     queue: Entity<Queue>,
     settings: Entity<AppSettings>,
@@ -485,6 +487,7 @@ impl Playback {
             track: None,
             engine: None,
             local_engine: None,
+            devices: Vec::new(),
             session,
             queue,
             settings,
@@ -2006,6 +2009,30 @@ impl Playback {
         self.level
     }
 
+    /// The account's Connect devices, empty while the streaming engine is not up.
+    pub fn devices(&self) -> &[music::Device] {
+        match self.engine {
+            Some(_) => &self.devices,
+            None => &[],
+        }
+    }
+
+    /// Moves playback to `device`. Coming back to this device reloads the track here at the
+    /// position Sonora last knew, since Spotify only hands over a context Sonora has no queue for.
+    pub fn transfer_to(&mut self, device: &music::Device, cx: &mut Context<Self>) {
+        if device.active {
+            return;
+        }
+        if device.local {
+            if !self.local_active() && self.track.is_some() {
+                self.intent = Intent::Play;
+                self.reload_and_seek(self.position, cx);
+            }
+        } else if let Some(engine) = self.engine.as_ref() {
+            engine.transfer(&device.id);
+        }
+    }
+
     pub fn set_volume(&mut self, level: f32, cx: &mut Context<Self>) {
         self.level = level.clamp(0., 1.);
         self.settings
@@ -2186,6 +2213,7 @@ impl Playback {
 
         self.listen(events, false, cx);
         self.engine = Some(engine);
+        self.devices.clear();
         self.refused = None;
         if !self.local_active() {
             self.state = PlaybackState::Idle;
@@ -2233,6 +2261,14 @@ impl Playback {
     /// or about another track, are dropped, so a late event from a previous load cannot move
     /// the clock.
     fn on_backend_event(&mut self, event: BackendEvent, local: bool, cx: &mut Context<Self>) {
+        // The device list is about the account, not the track, so it ignores the filters below.
+        if let BackendEvent::Devices(devices) = event {
+            if !local {
+                self.devices = devices;
+                cx.notify();
+            }
+            return;
+        }
         if local != self.local_active() {
             return;
         }
@@ -2397,6 +2433,7 @@ impl Playback {
                 self.gate(cx);
                 cx.emit(PlaybackEvent::EndedPlayback);
             }
+            BackendEvent::Devices(_) => {}
         }
         cx.notify();
     }

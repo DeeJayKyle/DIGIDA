@@ -238,6 +238,7 @@ player-mute = Mute
 player-unmute = Unmute
 player-previous = Previous track
 player-next = Next track
+player-devices = Connect to a device
 player-fullscreen = Fullscreen
 player-fullscreen-leave = Leave fullscreen
 fullscreen-artwork = Artwork

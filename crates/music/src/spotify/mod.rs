@@ -3,6 +3,7 @@ pub mod auth;
 mod albums;
 mod artists;
 mod client;
+mod connect;
 mod collection;
 mod collection2;
 mod lyrics;

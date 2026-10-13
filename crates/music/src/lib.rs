@@ -344,6 +344,17 @@ pub struct PlaybackConfig {
     pub equalizer: Equalizer,
 }
 
+/// A Spotify Connect device on the account, as the engine last heard of it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Device {
+    pub id: String,
+    pub name: String,
+    /// Playing, or holding the session, right now.
+    pub active: bool,
+    /// This engine's own device.
+    pub local: bool,
+}
+
 /// What an engine reports back. `Playing` and `Seeked` mean audio from `at` is reaching the
 /// output, not that a decoder is ready, so whatever follows the sound can start on them.
 #[derive(Clone, Debug, PartialEq)]
@@ -394,6 +405,8 @@ pub enum PlaybackEvent {
     Refused,
     Gated,
     OutputChanged,
+    /// The account's Connect devices changed. Only engines that are on Connect send this.
+    Devices(Vec<Device>),
 }
 
 impl PlaybackEvent {
@@ -434,6 +447,9 @@ pub trait Player: Send + Sync {
     /// `Seeked` event follows once audio from there reaches the output.
     fn seek(&self, position: Duration);
     fn set_gain(&self, gain: f32);
+
+    /// Moves playback to another device by its id. Engines without devices ignore it.
+    fn transfer(&self, _device_id: &str) {}
 
     fn spectrum(&self) -> Option<Spectrum> {
         None
