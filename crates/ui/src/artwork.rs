@@ -749,6 +749,12 @@ pub(crate) fn sample_palette(url: SharedString, cx: &mut App) -> Task<CoverPalet
     })
 }
 
+/// The corner radius a square cover is drawn with when the caller does not pass its own, so
+/// anything layered under a cover can follow its outline.
+pub fn artwork_radius(cx: &App) -> Pixels {
+    cx.theme().radius.min(ROUNDED)
+}
+
 pub fn artwork_usage(cx: &App) -> Option<(usize, usize)> {
     let installed = cx.try_global::<Installed>()?;
     let cache = installed.0.read(cx);
@@ -893,7 +899,7 @@ impl RenderOnce for Artwork {
         let rounded = match (circle, radius) {
             (true, _) => size / 2.,
             (false, Some(radius)) => radius,
-            (false, None) => cx.theme().radius.min(ROUNDED),
+            (false, None) => artwork_radius(cx),
         };
         let placeholder = {
             let fallback = fallback.clone();

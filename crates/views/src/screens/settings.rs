@@ -148,6 +148,7 @@ enum Slot {
     Font,
     Typeface,
     Motion,
+    AlbumPulse,
     Pace,
     Saver,
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
@@ -596,9 +597,9 @@ impl SettingsView {
                 Slot::Typeface,
                 Slot::Title("settings-group-motion"),
                 Slot::Motion,
-                Slot::Pace,
-                Slot::Saver,
             ])
+            .chain(ui::motion::animates(cx).then_some(Slot::AlbumPulse))
+            .chain([Slot::Pace, Slot::Saver])
             .chain(self.decoration_slots(cx))
             .chain([Slot::Title("settings-advanced"), Slot::AdaptiveMenu])
             .collect(),
@@ -727,6 +728,10 @@ impl SettingsView {
             Slot::Font => (t!("settings-font"), t!("settings-font-detail")),
             Slot::Typeface => (t!("settings-typeface"), t!("settings-typeface-detail")),
             Slot::Motion => (t!("settings-motion"), t!("settings-motion-detail")),
+            Slot::AlbumPulse => (
+                t!("settings-album-pulse"),
+                t!("settings-album-pulse-detail"),
+            ),
             Slot::Pace => (t!("settings-pace"), t!("settings-pace-detail")),
             Slot::Saver => (t!("settings-saver"), t!("settings-saver-detail")),
             #[cfg(any(target_os = "linux", target_os = "freebsd"))]
@@ -959,6 +964,7 @@ impl SettingsView {
             Slot::Font => self.font_row(cx).element,
             Slot::Typeface => self.typeface_row(cx).element,
             Slot::Motion => self.motion_row(cx).element,
+            Slot::AlbumPulse => self.album_pulse_row(cx).element,
             Slot::Pace => self.pace_row(cx).element,
             Slot::Saver => self.saver_row(cx).element,
             #[cfg(any(target_os = "linux", target_os = "freebsd"))]
@@ -2079,6 +2085,28 @@ impl SettingsView {
             muted,
             small,
             picker.into_any_element(),
+        )
+    }
+
+    /// The glow on the player bar's artwork. Hidden while motion is reduced, by this setting or
+    /// by the system, since the glow never shows then.
+    fn album_pulse_row(&self, cx: &mut Context<Self>) -> Setting {
+        let theme = *cx.theme();
+        let muted = theme.muted_foreground;
+        let small = theme.text(Text::Small);
+        let on = self.settings.read(cx).album_pulse();
+
+        self.row(
+            t!("settings-album-pulse"),
+            t!("settings-album-pulse-detail"),
+            muted,
+            small,
+            Switch::new("album-pulse", on)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.settings
+                        .update(cx, |settings, cx| settings.set_album_pulse(!on, cx));
+                }))
+                .into_any_element(),
         )
     }
 
