@@ -5,6 +5,7 @@ pub mod binimum;
 pub mod credentials;
 pub mod deezer;
 pub mod drm;
+pub mod effects;
 pub mod engine;
 pub mod equalizer;
 pub mod escape;
@@ -42,6 +43,7 @@ use time::parsing::Parsed;
 use time::{Month, OffsetDateTime};
 
 pub use audio::{Server as SoundServer, failing as output_failing, missing_bridge};
+pub use effects::Effects;
 pub use equalizer::Equalizer;
 pub use models::{
     Album, AlbumCatalogue, AlbumDetail, Artist, ArtistCatalogue, ArtistProfile, ArtistRef,
@@ -334,14 +336,15 @@ pub trait LyricsProvider: Send + Sync {
     async fn search(&self, query: &LyricsQuery) -> Result<Vec<LyricsHit>>;
 }
 
-/// What an engine is started with. `equalizer` is shared rather than copied: the engine keeps
-/// reading it, so a change reaches the output without a restart.
+/// What an engine is started with. `effects` and `equalizer` are shared rather than copied:
+/// the engine keeps reading them, so a change reaches the output without a restart.
 #[derive(Clone, Debug)]
 pub struct PlaybackConfig {
     pub normalisation: bool,
     pub gapless: bool,
     pub position_interval: Duration,
     pub gain: f32,
+    pub effects: Effects,
     pub equalizer: Equalizer,
 }
 

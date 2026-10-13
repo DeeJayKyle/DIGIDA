@@ -130,6 +130,7 @@ impl Engine {
         let sink_cue = cue.clone();
         let chain = Chain {
             volume: volume.clone(),
+            effects: config.effects.clone(),
             equalizer: config.equalizer.clone(),
             spectrum: spectrum.clone(),
         };
