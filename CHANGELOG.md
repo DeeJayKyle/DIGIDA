@@ -7,6 +7,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- The artwork in the player bar now pulses with a soft glow in time with the music. Turn it off
+  with Album pulse under Settings > Appearance > Motion.
+
 ## [0.42.2] - 2026-10-07
 
 ### Added

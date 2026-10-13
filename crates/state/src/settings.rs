@@ -352,6 +352,8 @@ struct Appearance {
     traffic_light_controls: bool,
     controls_on_left: bool,
     reduce_motion: String,
+    /// Whether the player bar's artwork glows with the beat.
+    album_pulse: bool,
     motion_pace: String,
     battery_saver: String,
     theme_overrides: ThemeOverrides,
@@ -608,6 +610,7 @@ impl Default for Appearance {
             traffic_light_controls: false,
             controls_on_left: false,
             reduce_motion: Stillness::default().id().to_owned(),
+            album_pulse: true,
             motion_pace: Pace::default().id().to_owned(),
             battery_saver: Saver::default().id().to_owned(),
             theme_overrides: ThemeOverrides::default(),
@@ -995,6 +998,12 @@ impl AppSettings {
 
     pub fn stillness(&self) -> Stillness {
         Stillness::from_id(&self.values.appearance.reduce_motion)
+    }
+
+    /// Whether the player bar's artwork glows with the beat. Reduced motion stills it whatever
+    /// this says.
+    pub fn album_pulse(&self) -> bool {
+        self.values.appearance.album_pulse
     }
 
     pub fn pace(&self) -> Pace {
@@ -1578,6 +1587,11 @@ impl AppSettings {
 
     pub fn set_ambient_motion(&mut self, motion: bool, cx: &mut Context<Self>) {
         self.values.appearance.ambient_motion = motion;
+        self.schedule_save(cx);
+    }
+
+    pub fn set_album_pulse(&mut self, pulse: bool, cx: &mut Context<Self>) {
+        self.values.appearance.album_pulse = pulse;
         self.schedule_save(cx);
     }
 

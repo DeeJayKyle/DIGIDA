@@ -1,3 +1,4 @@
+mod artwork_glow;
 mod aside;
 mod player_bar;
 mod sidebar_left;

@@ -17,6 +17,7 @@ use ui::{
 };
 
 use crate::chrome::SidebarRight;
+use crate::chrome::artwork_glow::ArtworkGlow;
 use crate::shared::menus::ItemMenu;
 use crate::shared::transport::{NOTCH, like, moved, percent, transport, volume_icon};
 
@@ -39,6 +40,7 @@ pub(crate) struct PlayerBar {
     over_volume: Option<f32>,
     volume_held: bool,
     muted: Option<f32>,
+    glow: Entity<ArtworkGlow>,
 }
 
 impl PlayerBar {
@@ -52,6 +54,7 @@ impl PlayerBar {
 
         let me = cx.entity_id();
         let playlist_scrollbar = cx.new(|_| Scrollbar::inset().watching(me));
+        let glow = cx.new(|cx| ArtworkGlow::new(playback.clone(), cx));
 
         Self {
             playback,
@@ -66,6 +69,7 @@ impl PlayerBar {
             over_volume: None,
             volume_held: false,
             muted: None,
+            glow,
         }
     }
 
@@ -269,6 +273,9 @@ impl PlayerBar {
                             }),
                         )
                     })
+                    .relative()
+                    .size(artwork)
+                    .child(self.glow.clone())
                     .child(Artwork::new(cover).size(artwork)),
             )
             .when(room, |this| {
