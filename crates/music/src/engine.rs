@@ -309,6 +309,7 @@ async fn engine_loop<F: Fetch>(
     // output. A track's own loudness gain is applied as it is decoded, in `Playing`.
     let chain = Chain {
         volume: Volume::new(config.gain),
+        effects: config.effects.clone(),
         equalizer: config.equalizer.clone(),
         spectrum,
     };

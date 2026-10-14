@@ -19,6 +19,7 @@ use gpui::{
     WindowBounds, point, px, size,
 };
 use music::WritingSystem;
+use music::effects;
 use music::equalizer::{self, Gains};
 use music::lyrics::LOCAL;
 use music::scrobble::Account;
@@ -187,6 +188,47 @@ impl Default for RomanizationScripts {
     }
 }
 
+/// The effect values as `settings.json` keeps them. Missing keys take the neutral value.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[serde(default)]
+struct EffectValues {
+    speed: f32,
+    keep_pitch: bool,
+    cutoff: f32,
+    reverb: f32,
+    room: f32,
+}
+
+impl Default for EffectValues {
+    fn default() -> Self {
+        effects::Settings::NEUTRAL.into()
+    }
+}
+
+impl From<effects::Settings> for EffectValues {
+    fn from(settings: effects::Settings) -> Self {
+        Self {
+            speed: settings.speed,
+            keep_pitch: settings.keep_pitch,
+            cutoff: settings.cutoff,
+            reverb: settings.reverb,
+            room: settings.room,
+        }
+    }
+}
+
+impl From<EffectValues> for effects::Settings {
+    fn from(values: EffectValues) -> Self {
+        Self {
+            speed: values.speed,
+            keep_pitch: values.keep_pitch,
+            cutoff: values.cutoff,
+            reverb: values.reverb,
+            room: values.room,
+        }
+    }
+}
+
 /// A window's saved position and size in logical pixels, plus whether it was maximized.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -279,6 +321,10 @@ struct Values {
     /// Per band gains in decibels, lowest band first. Kept even while `equalizer` is off, so
     /// turning it back on restores the curve.
     equalizer_bands: Vec<f32>,
+    /// Whether speed, the low-pass and reverb are applied.
+    effects: bool,
+    /// The effect values. Kept even while `effects` is off, so turning it back on restores them.
+    effect_values: EffectValues,
     sleep_timer: bool,
     discord_presence: bool,
     discord_name: DiscordName,
@@ -435,6 +481,8 @@ impl Default for Values {
             gapless: true,
             equalizer: false,
             equalizer_bands: vec![0.; equalizer::BANDS],
+            effects: false,
+            effect_values: EffectValues::default(),
             sleep_timer: false,
             discord_presence: false,
             discord_name: DiscordName::Sonora,
@@ -765,6 +813,15 @@ impl AppSettings {
         let stored = &self.values.equalizer_bands;
         let gains = std::array::from_fn(|band| stored.get(band).copied().unwrap_or(0.));
         equalizer::clamped(&gains)
+    }
+
+    pub fn effects(&self) -> bool {
+        self.values.effects
+    }
+
+    /// The stored effect values, clamped into range so a file edited by hand still loads.
+    pub fn effect_settings(&self) -> effects::Settings {
+        effects::Settings::from(self.values.effect_values).clamped()
     }
 
     pub fn sleep_timer(&self) -> bool {
@@ -1158,6 +1215,16 @@ impl AppSettings {
 
     pub fn set_equalizer_gains(&mut self, gains: &Gains, cx: &mut Context<Self>) {
         self.values.equalizer_bands = equalizer::clamped(gains).to_vec();
+        self.schedule_save(cx);
+    }
+
+    pub fn set_effects(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.values.effects = on;
+        self.schedule_save(cx);
+    }
+
+    pub fn set_effect_settings(&mut self, settings: effects::Settings, cx: &mut Context<Self>) {
+        self.values.effect_values = settings.clamped().into();
         self.schedule_save(cx);
     }
 

@@ -190,9 +190,9 @@ impl Default for Equalizer {
     }
 }
 
-/// One peaking biquad in transposed direct form II. `a0` is normalised away.
+/// One biquad in transposed direct form II. `a0` is normalised away.
 #[derive(Clone, Copy, Default)]
-struct Biquad {
+pub(crate) struct Biquad {
     b0: f32,
     b1: f32,
     b2: f32,
@@ -222,7 +222,23 @@ impl Biquad {
         }
     }
 
-    fn identity() -> Self {
+    /// The RBJ cookbook low-pass at `frequency` with resonance `q`.
+    pub(crate) fn low_pass(frequency: f32, q: f32, rate: f32) -> Self {
+        let w0 = std::f32::consts::TAU * frequency / rate;
+        let (sin, cos) = w0.sin_cos();
+        let alpha = sin / (2. * q);
+
+        let a0 = 1. + alpha;
+        Self {
+            b0: (1. - cos) / 2. / a0,
+            b1: (1. - cos) / a0,
+            b2: (1. - cos) / 2. / a0,
+            a1: (-2. * cos) / a0,
+            a2: (1. - alpha) / a0,
+        }
+    }
+
+    pub(crate) fn identity() -> Self {
         Self {
             b0: 1.,
             ..Self::default()
@@ -232,14 +248,27 @@ impl Biquad {
 
 /// The two delay elements one biquad keeps for one channel.
 #[derive(Clone, Copy, Default)]
-struct Delay {
+pub(crate) struct Delay {
     z1: f32,
     z2: f32,
 }
 
 impl Delay {
+    /// The state `coefficients` settle into after a long run of `x`, so a filter switched in
+    /// mid-stream picks up from the signal rather than from silence.
+    pub(crate) fn settled(coefficients: &Biquad, x: f32) -> Self {
+        let gain = (coefficients.b0 + coefficients.b1 + coefficients.b2)
+            / (1. + coefficients.a1 + coefficients.a2);
+        let y = gain * x;
+        let z2 = coefficients.b2 * x - coefficients.a2 * y;
+        Self {
+            z1: coefficients.b1 * x - coefficients.a1 * y + z2,
+            z2,
+        }
+    }
+
     #[inline]
-    fn run(&mut self, coefficients: &Biquad, x: f32) -> f32 {
+    pub(crate) fn run(&mut self, coefficients: &Biquad, x: f32) -> f32 {
         let y = coefficients.b0 * x + self.z1;
         self.z1 = coefficients.b1 * x - coefficients.a1 * y + self.z2;
         self.z2 = coefficients.b2 * x - coefficients.a2 * y;

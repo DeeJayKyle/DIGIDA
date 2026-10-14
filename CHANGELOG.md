@@ -7,6 +7,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Settings has an Effects section under Playback: change the speed with or without shifting
+  the pitch, muffle the sound with a low-pass filter, and add reverb. Presets include slowed +
+  reverb and nightcore.
+
 ## [0.43.0] - 2026-10-13
 
 ### Added

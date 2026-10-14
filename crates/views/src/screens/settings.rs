@@ -17,6 +17,7 @@ use gpui::{
 use gpui::{ScrollHandle, prelude::*, svg};
 use i18n::{Language, t};
 use music::drm::Origin;
+use music::effects::{self, MAX_CUTOFF, MAX_SPEED, MIN_CUTOFF, MIN_SPEED};
 use music::equalizer::{self, Preset};
 use music::scrobble::{Link, Secret};
 use music::{AccountChoice, SignIn, SignInPrompt, WritingSystem};
@@ -79,6 +80,11 @@ const SLEEP: &str = "sleep";
 const EQUALIZER_PRESETS: &str = "equalizer-presets";
 // the step a dragged band snaps to, in decibels
 const EQUALIZER_STEP: f32 = 0.5;
+const EFFECT_PRESETS: &str = "effect-presets";
+// the step a dragged speed snaps to
+const SPEED_STEP: f32 = 0.05;
+// how far along its slider the cutoff opens the filter
+const CUTOFF_OPEN: f32 = 0.98;
 const SLEEP_MAX_MINUTES: u64 = 120;
 const SLEEP_MAGNETS: [u64; 4] = [15, 30, 45, 60];
 const SLEEP_MAGNET_WEIGHT: usize = 4;
@@ -179,6 +185,13 @@ enum Slot {
     Equalizer,
     EqualizerPreset,
     EqualizerBands,
+    Effects,
+    EffectsPreset,
+    Speed,
+    KeepPitch,
+    LowPass,
+    Reverb,
+    Room,
     LyricsProviders,
     PreferLocalLyrics,
     Karaoke,
@@ -318,6 +331,10 @@ pub struct SettingsView {
     sleep: ScrubberState,
     /// One slider per equalizer band, lowest first.
     bands: Vec<ScrubberState>,
+    speed: ScrubberState,
+    cutoff: ScrubberState,
+    reverb: ScrubberState,
+    room: ScrubberState,
     pending_sleep: Option<Option<Sleep>>,
     popovers: Popovers,
     server: Entity<Input>,
@@ -421,6 +438,10 @@ impl SettingsView {
             bands: (0..equalizer::BANDS)
                 .map(|band| ScrubberState::new(format!("equalizer-band-{band}")))
                 .collect(),
+            speed: ScrubberState::new("effects-speed"),
+            cutoff: ScrubberState::new("effects-cutoff"),
+            reverb: ScrubberState::new("effects-reverb"),
+            room: ScrubberState::new("effects-room"),
             pending_sleep: None,
             popovers: Popovers::default(),
             server: cx.new(|cx| Input::new("login-server-hint", cx)),
@@ -628,6 +649,17 @@ impl SettingsView {
                     slots.push(Slot::EqualizerPreset);
                     slots.push(Slot::EqualizerBands);
                 }
+                slots.extend([Slot::Title("settings-group-effects"), Slot::Effects]);
+                if self.playback.read(cx).effects() {
+                    slots.extend([
+                        Slot::EffectsPreset,
+                        Slot::Speed,
+                        Slot::KeepPitch,
+                        Slot::LowPass,
+                        Slot::Reverb,
+                        Slot::Room,
+                    ]);
+                }
                 slots.extend([Slot::Title("settings-group-lyrics"), Slot::LyricsProviders]);
                 if self
                     .settings
@@ -790,6 +822,31 @@ impl SettingsView {
                 t!("settings-equalizer-preset-detail"),
             ),
             Slot::EqualizerBands => (t!("settings-group-equalizer"), SharedString::default()),
+            Slot::Effects => (t!("settings-effects"), t!("settings-effects-detail")),
+            Slot::EffectsPreset => (
+                t!("settings-effects-preset"),
+                t!("settings-effects-preset-detail"),
+            ),
+            Slot::Speed => (
+                t!("settings-effects-speed"),
+                t!("settings-effects-speed-detail"),
+            ),
+            Slot::KeepPitch => (
+                t!("settings-effects-keep-pitch"),
+                t!("settings-effects-keep-pitch-detail"),
+            ),
+            Slot::LowPass => (
+                t!("settings-effects-low-pass"),
+                t!("settings-effects-low-pass-detail"),
+            ),
+            Slot::Reverb => (
+                t!("settings-effects-reverb"),
+                t!("settings-effects-reverb-detail"),
+            ),
+            Slot::Room => (
+                t!("settings-effects-room"),
+                t!("settings-effects-room-detail"),
+            ),
             Slot::LyricsProviders => (
                 t!("settings-lyrics-providers"),
                 t!("settings-lyrics-providers-detail"),
@@ -1000,6 +1057,13 @@ impl SettingsView {
             Slot::Equalizer => self.equalizer_row(cx).element,
             Slot::EqualizerPreset => self.equalizer_preset_row(cx).element,
             Slot::EqualizerBands => self.equalizer_bands_row(cx).element,
+            Slot::Effects => self.effects_row(cx).element,
+            Slot::EffectsPreset => self.effects_preset_row(cx).element,
+            Slot::Speed => self.speed_row(cx).element,
+            Slot::KeepPitch => self.keep_pitch_row(cx).element,
+            Slot::LowPass => self.low_pass_row(cx).element,
+            Slot::Reverb => self.reverb_row(cx).element,
+            Slot::Room => self.room_row(cx).element,
             Slot::LyricsProviders => self.lyrics_providers_row(cx).element,
             Slot::PreferLocalLyrics => self.prefer_local_lyrics_row(cx).element,
             Slot::Karaoke => self.karaoke_lyrics_row(cx).element,
@@ -2415,6 +2479,215 @@ impl SettingsView {
                 .children(columns)
                 .into_any_element(),
         }
+    }
+
+    fn effects_row(&self, cx: &mut Context<Self>) -> Setting {
+        let theme = *cx.theme();
+        let on = self.playback.read(cx).effects();
+
+        self.row(
+            t!("settings-effects"),
+            t!("settings-effects-detail"),
+            theme.muted_foreground,
+            theme.text(Text::Small),
+            Switch::new("effects", on)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.playback
+                        .update(cx, |playback, cx| playback.set_effects(!on, cx));
+                }))
+                .into_any_element(),
+        )
+    }
+
+    /// The preset picker. Like the equalizer's, it reads the values back, so a slider moved by
+    /// hand shows as Custom.
+    fn effects_preset_row(&self, cx: &mut Context<Self>) -> Setting {
+        let theme = *cx.theme();
+        let current = self.playback.read(cx).effect_settings();
+        let chosen = effects::Preset::matching(&current);
+        let label = match chosen {
+            Some(preset) => i18n::lookup(effect_preset_key(preset), None),
+            None => t!("settings-effects-custom"),
+        };
+
+        let picker = Picker::new(EFFECT_PRESETS, &self.popovers, label)
+            .width(Picker::NARROW)
+            .items(effects::Preset::ALL.map(|preset| {
+                MenuItem::new(preset.id(), i18n::lookup(effect_preset_key(preset), None))
+                    .selected(chosen == Some(preset))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.playback.update(cx, |playback, cx| {
+                            let settings = preset.settings(playback.effect_settings());
+                            playback.set_effect_settings(settings, cx)
+                        });
+                        cx.notify();
+                    }))
+            }));
+
+        self.row(
+            t!("settings-effects-preset"),
+            t!("settings-effects-preset-detail"),
+            theme.muted_foreground,
+            theme.text(Text::Small),
+            picker.into_any_element(),
+        )
+    }
+
+    fn speed_row(&self, cx: &mut Context<Self>) -> Setting {
+        let theme = *cx.theme();
+        let speed = self.playback.read(cx).effect_settings().speed;
+        let slider = self.effect_slider(
+            &self.speed,
+            speed_fraction(speed),
+            t!(
+                "settings-effects-speed-value",
+                speed = format!("{speed:.2}")
+            ),
+            |settings, fraction| effects::Settings {
+                speed: speed_at(fraction),
+                ..settings
+            },
+            cx,
+        );
+
+        self.row(
+            t!("settings-effects-speed"),
+            t!("settings-effects-speed-detail"),
+            theme.muted_foreground,
+            theme.text(Text::Small),
+            slider,
+        )
+    }
+
+    fn keep_pitch_row(&self, cx: &mut Context<Self>) -> Setting {
+        let theme = *cx.theme();
+        let on = self.playback.read(cx).effect_settings().keep_pitch;
+
+        self.row(
+            t!("settings-effects-keep-pitch"),
+            t!("settings-effects-keep-pitch-detail"),
+            theme.muted_foreground,
+            theme.text(Text::Small),
+            Switch::new("effects-keep-pitch", on)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.playback.update(cx, |playback, cx| {
+                        let settings = effects::Settings {
+                            keep_pitch: !on,
+                            ..playback.effect_settings()
+                        };
+                        playback.set_effect_settings(settings, cx)
+                    });
+                }))
+                .into_any_element(),
+        )
+    }
+
+    fn low_pass_row(&self, cx: &mut Context<Self>) -> Setting {
+        let theme = *cx.theme();
+        let cutoff = self.playback.read(cx).effect_settings().cutoff;
+        let slider = self.effect_slider(
+            &self.cutoff,
+            cutoff_fraction(cutoff),
+            cutoff_label(cutoff),
+            |settings, fraction| effects::Settings {
+                cutoff: cutoff_at(fraction),
+                ..settings
+            },
+            cx,
+        );
+
+        self.row(
+            t!("settings-effects-low-pass"),
+            t!("settings-effects-low-pass-detail"),
+            theme.muted_foreground,
+            theme.text(Text::Small),
+            slider,
+        )
+    }
+
+    fn reverb_row(&self, cx: &mut Context<Self>) -> Setting {
+        let theme = *cx.theme();
+        let reverb = self.playback.read(cx).effect_settings().reverb;
+        let slider = self.effect_slider(
+            &self.reverb,
+            reverb,
+            t!("settings-effects-percent", percent = percent(reverb)),
+            |settings, fraction| effects::Settings {
+                reverb: hundredths(fraction),
+                ..settings
+            },
+            cx,
+        );
+
+        self.row(
+            t!("settings-effects-reverb"),
+            t!("settings-effects-reverb-detail"),
+            theme.muted_foreground,
+            theme.text(Text::Small),
+            slider,
+        )
+    }
+
+    fn room_row(&self, cx: &mut Context<Self>) -> Setting {
+        let theme = *cx.theme();
+        let room = self.playback.read(cx).effect_settings().room;
+        let slider = self.effect_slider(
+            &self.room,
+            room,
+            t!("settings-effects-percent", percent = percent(room)),
+            |settings, fraction| effects::Settings {
+                room: hundredths(fraction),
+                ..settings
+            },
+            cx,
+        );
+
+        self.row(
+            t!("settings-effects-room"),
+            t!("settings-effects-room-detail"),
+            theme.muted_foreground,
+            theme.text(Text::Small),
+            slider,
+        )
+    }
+
+    /// A slider with its value read out beside it, the way the opacity row draws one. `apply`
+    /// turns the dragged fraction into new effect values, which reach the engines as the
+    /// slider moves.
+    fn effect_slider(
+        &self,
+        state: &ScrubberState,
+        fraction: f32,
+        readout: SharedString,
+        apply: fn(effects::Settings, f32) -> effects::Settings,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = *cx.theme();
+        div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(
+                div().w(theme.metrics.cover).child(
+                    Scrubber::new(state, fraction)
+                        .colors(theme.progress_bar, theme.muted, theme.foreground)
+                        .on_move(cx.listener(move |this, fraction: &f32, _, cx| {
+                            this.playback.update(cx, |playback, cx| {
+                                let settings = apply(playback.effect_settings(), *fraction);
+                                playback.set_effect_settings(settings, cx)
+                            });
+                        })),
+                ),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .w(theme.metrics.control * 1.5)
+                    .whitespace_nowrap()
+                    .text_right()
+                    .child(readout),
+            )
+            .into_any_element()
     }
 
     fn sleep_row(&self, cx: &mut Context<Self>) -> Setting {
@@ -4760,6 +5033,73 @@ fn preset_key(preset: Preset) -> &'static str {
         Preset::Acoustic => "settings-equalizer-acoustic",
         Preset::Loudness => "settings-equalizer-loudness",
     }
+}
+
+fn effect_preset_key(preset: effects::Preset) -> &'static str {
+    match preset {
+        effects::Preset::Off => "settings-effects-off",
+        effects::Preset::SlowedReverb => "settings-effects-slowed-reverb",
+        effects::Preset::Nightcore => "settings-effects-nightcore",
+        effects::Preset::LoFi => "settings-effects-lo-fi",
+        effects::Preset::Muffled => "settings-effects-muffled",
+        effects::Preset::Hall => "settings-effects-hall",
+    }
+}
+
+/// Where a speed sits on its slider: on a log scale, so normal speed is in the middle and
+/// half and double are the ends.
+fn speed_fraction(speed: f32) -> f32 {
+    let (low, high) = (MIN_SPEED.log2(), MAX_SPEED.log2());
+    (speed.log2() - low) / (high - low)
+}
+
+/// The speed at a point on its slider, snapped to `SPEED_STEP`.
+fn speed_at(fraction: f32) -> f32 {
+    let (low, high) = (MIN_SPEED.log2(), MAX_SPEED.log2());
+    let raw = (low + fraction * (high - low)).exp2();
+    ((raw / SPEED_STEP).round() * SPEED_STEP).clamp(MIN_SPEED, MAX_SPEED)
+}
+
+/// Where a cutoff sits on its slider: on a log scale, so every octave gets the same room.
+fn cutoff_fraction(cutoff: f32) -> f32 {
+    (cutoff / MIN_CUTOFF).ln() / (MAX_CUTOFF / MIN_CUTOFF).ln()
+}
+
+/// The cutoff at a point on its slider, rounded to two significant figures. The far end
+/// opens the filter.
+fn cutoff_at(fraction: f32) -> f32 {
+    if fraction >= CUTOFF_OPEN {
+        return MAX_CUTOFF;
+    }
+    let raw = MIN_CUTOFF * (MAX_CUTOFF / MIN_CUTOFF).powf(fraction.max(0.));
+    let unit = 10f32.powf(raw.log10().floor() - 1.);
+    ((raw / unit).round() * unit).clamp(MIN_CUTOFF, MAX_CUTOFF)
+}
+
+/// A cutoff as the readout shows it: Off when the filter is open, then hertz, then kilohertz
+/// with one decimal when it has one.
+fn cutoff_label(cutoff: f32) -> SharedString {
+    if cutoff >= MAX_CUTOFF {
+        return t!("settings-effects-low-pass-off");
+    }
+    match cutoff >= 1_000. {
+        true => {
+            let khz = format!("{:.1}", cutoff / 1_000.);
+            let khz = khz.strip_suffix(".0").unwrap_or(&khz).to_owned();
+            t!("settings-equalizer-kilohertz", khz = khz)
+        }
+        false => t!("settings-equalizer-hertz", hz = cutoff.round() as i64),
+    }
+}
+
+/// A share from zero to one as a whole percentage.
+fn percent(share: f32) -> i64 {
+    (share * 100.).round() as i64
+}
+
+/// A slider's fraction snapped to the nearest hundredth.
+fn hundredths(fraction: f32) -> f32 {
+    (fraction.clamp(0., 1.) * 100.).round() / 100.
 }
 
 /// A band gain as the readout shows it: signed, with the decimal only when it is not zero.

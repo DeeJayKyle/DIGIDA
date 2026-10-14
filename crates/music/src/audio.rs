@@ -5,9 +5,10 @@ use std::time::Duration;
 
 use anyhow::{Context as _, Result};
 use cpal::traits::{DeviceTrait, HostTrait};
-use rodio::source::SeekError;
+use rodio::source::{SeekError, UniformSourceIterator};
 use rodio::{DeviceSinkBuilder, MixerDeviceSink, Source};
 
+use crate::effects::{Effected, Effects};
 use crate::equalizer::{Equalized, Equalizer};
 use crate::spectrum::{Spectrum, Tap};
 
@@ -45,10 +46,12 @@ impl Volume {
     }
 }
 
-/// What sits between the queue and the device: the equalizer, then the volume ramp, with the
-/// spectrum tap listening at the end. Every engine builds one and hands it to the output.
+/// What sits between the queue and the device: the effects, the equalizer, then the volume
+/// ramp, with the spectrum tap listening at the end. Every engine builds one and hands it to
+/// the output.
 pub struct Chain {
     pub volume: Volume,
+    pub effects: Effects,
     pub equalizer: Equalizer,
     pub spectrum: Spectrum,
 }
@@ -59,6 +62,7 @@ struct Device {
     /// The rate the stream was opened for, whether or not the device could honour it.
     wanted: Option<u32>,
     rate: u32,
+    channels: u16,
     failed: Arc<AtomicBool>,
     /// Taken when an output reopens the device at another rate, which closes the stream under
     /// every output still on it.
@@ -145,6 +149,7 @@ impl Device {
             id,
             wanted: rate,
             rate: config.sample_rate(),
+            channels: config.channels(),
             failed,
             stream: Mutex::new(Some(stream)),
         })
@@ -189,7 +194,8 @@ pub struct Output {
 
 impl Output {
     /// Joins the stream on the default output device at whatever rate it runs and runs every
-    /// sample through the equalizer and then the volume ramp before it reaches the mixer.
+    /// sample through the effects, the equalizer and then the volume ramp before it reaches the
+    /// mixer.
     pub fn open(chain: Chain) -> Result<Self> {
         let device = Device::shared(None)?;
         let sink = attach(&chain, &device);
@@ -509,12 +515,18 @@ fn ident(device: &cpal::Device) -> String {
         .unwrap_or_else(|_| "unknown".to_owned())
 }
 
-/// A fresh player whose chain plays into `device`.
+/// A fresh player whose chain plays into `device`. The player's packets are brought to the
+/// device's format first, which the mixer would do anyway, so the effects see one format for
+/// good and speed can draw on them at its own pace.
 fn attach(chain: &Chain, device: &Device) -> rodio::Player {
     let applied = chain.volume.get();
     let tap = chain.spectrum.attach();
     let (sink, source) = rodio::Player::new();
-    let equalized = Equalized::new(source, chain.equalizer.clone());
+    let channels = NonZero::new(device.channels).unwrap_or(NonZero::<u16>::MIN);
+    let rate = NonZero::new(device.rate).unwrap_or(NonZero::<u32>::MIN);
+    let uniform = UniformSourceIterator::new(source, channels, rate);
+    let effected = Effected::new(uniform, chain.effects.clone());
+    let equalized = Equalized::new(effected, chain.equalizer.clone());
     device.add(SmoothGain::new(equalized, chain.volume.clone(), applied, RAMP).with_tap(tap));
     sink
 }
