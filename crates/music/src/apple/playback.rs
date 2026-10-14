@@ -103,6 +103,14 @@ impl Fetch for Apple {
         loaded.loudness
     }
 
+    fn incomplete(&self, loaded: &Loaded) -> bool {
+        loaded.media.incomplete()
+    }
+
+    fn break_reason(&self, loaded: &Loaded) -> Option<String> {
+        loaded.media.break_reason()
+    }
+
     async fn downloaded(&self, loaded: &Loaded) {
         loaded.media.finished().await;
     }

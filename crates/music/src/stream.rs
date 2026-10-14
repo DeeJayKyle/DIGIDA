@@ -468,6 +468,37 @@ impl<B: Body> Stream<B> {
         self.shared.state.lock().ok()?.failed.clone()
     }
 
+    pub fn incomplete(&self) -> bool {
+        self.break_reason().is_some()
+    }
+
+    pub fn break_reason(&self) -> Option<String> {
+        let Ok(state) = self.shared.state.lock() else {
+            return None;
+        };
+        if let Some(failed) = state.failed.clone() {
+            return Some(format!(
+                "the download failed after {} of {} bytes: {failed}",
+                state.spool.len(),
+                total(state.total),
+            ));
+        }
+        if !state.complete {
+            return Some(format!(
+                "the download stalled at {} of {} bytes",
+                state.spool.len(),
+                total(state.total),
+            ));
+        }
+        match state.total {
+            Some(wanted) if (state.spool.len() as u64) < wanted => Some(format!(
+                "the download ended at {} of {wanted} bytes",
+                state.spool.len(),
+            )),
+            _ => None,
+        }
+    }
+
     pub fn downgrade(&self) -> WeakStream<B> {
         WeakStream {
             shared: Arc::downgrade(&self.shared),
@@ -684,6 +715,10 @@ fn announced(total: Option<u64>) -> Option<usize> {
     total
         .and_then(|total| usize::try_from(total).ok())
         .filter(|total| *total <= CEILING)
+}
+
+fn total(total: Option<u64>) -> String {
+    total.map_or("unknown".to_owned(), |announced| announced.to_string())
 }
 
 /// A file in Sonora's cache directory with no name, so nothing is left behind however the

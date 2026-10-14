@@ -79,6 +79,14 @@ impl Fetch for Deezer {
         loaded.loudness
     }
 
+    fn incomplete(&self, loaded: &Loaded) -> bool {
+        loaded.stream.incomplete()
+    }
+
+    fn break_reason(&self, loaded: &Loaded) -> Option<String> {
+        loaded.stream.break_reason()
+    }
+
     async fn downloaded(&self, loaded: &Loaded) {
         loaded.stream.finished().await;
     }

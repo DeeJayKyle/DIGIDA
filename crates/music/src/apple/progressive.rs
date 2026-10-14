@@ -482,6 +482,14 @@ impl Media {
         self.0.finished().await;
     }
 
+    pub fn incomplete(&self) -> bool {
+        self.0.incomplete()
+    }
+
+    pub fn break_reason(&self) -> Option<String> {
+        self.0.break_reason()
+    }
+
     /// A cursor over the whole track.
     pub fn reader(&self) -> Reader<Cenc> {
         self.0.reader()
