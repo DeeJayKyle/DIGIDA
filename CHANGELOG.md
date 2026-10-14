@@ -7,6 +7,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- A song whose download breaks halfway through no longer skips to the next one. Sonora
+  tries the same song again after a short wait, so a stalled stream resumes instead of
+  moving on.
+
 ## [0.43.0] - 2026-10-13
 
 ### Added

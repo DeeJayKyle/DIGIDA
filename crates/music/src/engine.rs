@@ -117,6 +117,14 @@ pub trait Fetch: Send + Sync + 'static {
     fn reopen_to_seek(&self) -> bool {
         false
     }
+
+    fn incomplete(&self, _loaded: &Self::Loaded) -> bool {
+        false
+    }
+
+    fn break_reason(&self, _loaded: &Self::Loaded) -> Option<String> {
+        None
+    }
 }
 
 /// Starts an engine for `fetch`. The pair it hands back is what a `PlaybackFactory` returns.
@@ -787,6 +795,7 @@ struct Join<F: Fetch> {
     loaded: F::Loaded,
     next: Option<(String, Option<Duration>)>,
     at: u64,
+    truncated: bool,
 }
 
 /// Decodes and writes until told otherwise. Every wait here is on the queue draining or on a
@@ -847,26 +856,48 @@ fn audio_loop<F: Fetch>(
         if let Some(join) = &joining
             && cue.played() >= join.at
         {
-            let Join { ended, next, .. } = joining.take().unwrap_or_else(|| unreachable!());
-            joins
-                .send(Joined {
-                    ended: ended.clone(),
-                    next: next.as_ref().map(|(id, _)| id.clone()),
-                })
-                .ok();
-            events.send(PlaybackEvent::Ended { id: Some(ended) }).ok();
-            heard = current.as_ref().map(Playing::mark);
-            match next {
-                Some((id, duration)) => {
-                    announce_length(&events, &id, duration);
-                    events
-                        .send(PlaybackEvent::Playing {
-                            id: Some(id),
-                            at: Duration::ZERO,
-                        })
-                        .ok();
+            let Join {
+                ended,
+                loaded,
+                next,
+                truncated,
+                ..
+            } = joining.take().unwrap_or_else(|| unreachable!());
+            if truncated {
+                current = None;
+                queued = None;
+                playing = false;
+                let reason = fetch
+                    .break_reason(&loaded)
+                    .map(|reason| format!(": {reason}"))
+                    .unwrap_or_default();
+                log::warn!(
+                    "playback: {ended} broke off before the download ended{reason}, retrying"
+                );
+                let id = Some(ended);
+                events.send(PlaybackEvent::Throttled { id }).ok();
+            } else {
+                drop(loaded);
+                joins
+                    .send(Joined {
+                        ended: ended.clone(),
+                        next: next.as_ref().map(|(id, _)| id.clone()),
+                    })
+                    .ok();
+                events.send(PlaybackEvent::Ended { id: Some(ended) }).ok();
+                heard = current.as_ref().map(Playing::mark);
+                match next {
+                    Some((id, duration)) => {
+                        announce_length(&events, &id, duration);
+                        events
+                            .send(PlaybackEvent::Playing {
+                                id: Some(id),
+                                at: Duration::ZERO,
+                            })
+                            .ok();
+                    }
+                    None => playing = false,
                 }
-                None => playing = false,
             }
         }
 
@@ -1036,24 +1067,31 @@ fn audio_loop<F: Fetch>(
             else {
                 continue;
             };
-            let next = queued.take().and_then(|(id, loaded)| {
-                let duration = fetch.length(&loaded);
-                current = Playing::open(
-                    fetch.as_ref(),
-                    &id,
-                    loaded,
-                    Duration::ZERO,
-                    written,
-                    normalise,
-                );
-                current.as_ref().map(|_| (id, duration))
-            });
+            let truncated = fetch.incomplete(&loaded);
+            let next = if truncated {
+                queued = None;
+                None
+            } else {
+                queued.take().and_then(|(id, loaded)| {
+                    let duration = fetch.length(&loaded);
+                    current = Playing::open(
+                        fetch.as_ref(),
+                        &id,
+                        loaded,
+                        Duration::ZERO,
+                        written,
+                        normalise,
+                    );
+                    current.as_ref().map(|_| (id, duration))
+                })
+            };
             // both events wait for the queue to reach here, so the join lands on the sample
             joining = Some(Join {
                 ended,
                 loaded,
                 next,
                 at: written,
+                truncated,
             });
             continue;
         };
