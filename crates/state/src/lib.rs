@@ -1,4 +1,5 @@
 mod artist;
+mod blocked;
 mod catalog;
 mod cover;
 mod detail;
@@ -35,6 +36,7 @@ mod wake;
 mod window_shape;
 
 pub use artist::{ArtistDetail, ArtistDetailEvent};
+pub use blocked::{Blocked, BlockedKind};
 pub use cover::Cover;
 pub use detail::{Collection, Detail, Header};
 pub use drm::{CdmState, Drm};

@@ -7,6 +7,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Block songs or artists from their right-click menus to exclude matching songs from playback,
+  queues and radio on that service. Manage the blocks in Settings > Playback; blocks stay on
+  this computer and can be removed at any time.
+
 ## [0.43.0] - 2026-10-13
 
 ### Added

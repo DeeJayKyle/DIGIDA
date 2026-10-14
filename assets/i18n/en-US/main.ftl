@@ -144,6 +144,20 @@ menu-play-tracks-last = { $count ->
    *[other] Play { $count } tracks last
 }
 menu-song-radio = Go to song radio
+menu-block-song = Block song
+menu-unblock-song = Unblock song
+menu-block-artist = Block artist
+menu-unblock-artist = Unblock artist
+blocked-song = Song
+blocked-artist = Artist
+settings-blocked = Blocked songs & artists
+settings-blocked-empty = Nothing blocked. Block songs or artists from their right-click menus.
+settings-blocked-item = Blocked { $kind } · { $provider }
+settings-unblock = Unblock
+toast-blocked = Blocked. Matching songs will not play in Sonora.
+toast-unblocked = Unblocked. You can add these songs to the queue again.
+toast-block-failed = Could not save the blocklist. Nothing was changed.
+toast-track-blocked = This song or its artist is blocked. Unblock it in Playback settings.
 menu-go-to-album = Go to album
 menu-go-to-artist = Go to artist
 menu-view-details = View details

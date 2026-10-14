@@ -493,6 +493,7 @@ pub enum FilterValue {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 struct StateValues {
+    blocked: Vec<crate::Blocked>,
     volume: f32,
     sidebar_width: f32,
     sidebar_open: bool,
@@ -521,6 +522,7 @@ struct StateValues {
 impl Default for StateValues {
     fn default() -> Self {
         Self {
+            blocked: Vec::new(),
             volume: DEFAULT_VOLUME,
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
             sidebar_open: true,
@@ -930,6 +932,41 @@ impl AppSettings {
 
     pub fn radio(&self) -> bool {
         self.state.radio
+    }
+
+    pub fn blocked(&self) -> &[crate::Blocked] {
+        &self.state.blocked
+    }
+
+    pub fn is_blocked(&self, track: &music::Track, session: &crate::Session) -> bool {
+        track
+            .id
+            .as_deref()
+            .and_then(|id| session.slug_for(id))
+            .is_some_and(|provider| {
+                self.state
+                    .blocked
+                    .iter()
+                    .any(|blocked| blocked.matches(track, provider))
+            })
+    }
+
+    /// Saves a block before changing playback, so a failed write leaves the old list intact.
+    pub fn set_blocked(
+        &mut self,
+        blocked: crate::Blocked,
+        on: bool,
+        cx: &mut Context<Self>,
+    ) -> Result<()> {
+        let mut state = self.state.clone();
+        state.blocked.retain(|item| !item.same(&blocked));
+        if on {
+            state.blocked.push(blocked);
+        }
+        self.store.save(&state)?;
+        self.state = state;
+        cx.notify();
+        Ok(())
     }
 
     pub fn language(&self) -> &str {
@@ -2601,6 +2638,12 @@ mod tests {
             provider: "youtube".to_owned(),
             sidebar_right_open: true,
             pinned: vec![held("spotify", "album")],
+            blocked: vec![crate::Blocked {
+                provider: "youtube".into(),
+                kind: crate::BlockedKind::Song,
+                id: Some("blocked-song".into()),
+                name: "Blocked song".into(),
+            }],
             ..StateValues::default()
         };
 
@@ -2611,7 +2654,9 @@ mod tests {
         assert_eq!(loaded.provider, "youtube");
         assert!(loaded.sidebar_right_open);
         assert_eq!(loaded.pinned.len(), 1);
+        assert_eq!(loaded.blocked, state.blocked);
 
+        drop(store);
         fs::remove_file(path).expect("test database is removed");
         fs::remove_dir(root).expect("test directory is removed");
     }

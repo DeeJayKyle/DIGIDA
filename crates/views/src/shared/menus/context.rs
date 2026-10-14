@@ -1,9 +1,11 @@
 use gpui::prelude::*;
 use gpui::{App, ClickEvent, ClipboardItem, Context, Entity, SharedString, Window};
 use i18n::t;
-use music::{Album, GenreItem, MediaKind, Playlist, SavedArtist, Track};
+use music::{Album, ArtistRef, GenreItem, MediaKind, Playlist, SavedArtist, Track};
 use router::{Destination, navigate};
-use state::{Addition, Detail, History, Library, Origin, Playback, Shelf, Sonora};
+use state::{
+    Addition, Blocked, BlockedKind, Detail, History, Library, Origin, Playback, Shelf, Sonora,
+};
 use ui::{Menu, MenuItem, MenuSearch, Pin, PinKind, Scrollbar, SubmenuState};
 
 use crate::shared::confirm::Confirm;
@@ -60,6 +62,7 @@ pub(crate) struct TrackColumns {
 pub(crate) struct ItemMenu {
     playlist_submenu: SubmenuState,
     artist_submenu: SubmenuState,
+    block_artist_submenu: SubmenuState,
     playlist_scrollbar: Entity<Scrollbar>,
     playlist_search: MenuSearch,
 }
@@ -69,6 +72,7 @@ impl ItemMenu {
         Self {
             playlist_submenu: SubmenuState::default(),
             artist_submenu: SubmenuState::default(),
+            block_artist_submenu: SubmenuState::default(),
             playlist_scrollbar,
             playlist_search: MenuSearch::new("menu-search-playlists", cx),
         }
@@ -78,6 +82,7 @@ impl ItemMenu {
         self.playlist_submenu.reset();
         self.playlist_search.reset();
         self.artist_submenu.reset();
+        self.block_artist_submenu.reset();
         self.playlist_scrollbar
             .read(cx)
             .scroll()
@@ -491,6 +496,53 @@ impl ItemMenu {
             .submenu(playlist_menu, self.playlist_submenu.clone())
         });
 
+        let session = Sonora::global(cx).session.read(cx);
+        let block_song = (!many)
+            .then(|| Blocked::song(track, session))
+            .flatten()
+            .map(|blocked| block_item("block-song", blocked, cx));
+        let block_artists = match (
+            many,
+            track.id.as_deref().and_then(|id| session.slug_for(id)),
+        ) {
+            (false, Some(provider)) => {
+                let artists = match track.artist_refs.is_empty() {
+                    true => vec![ArtistRef {
+                        name: track.artists.clone(),
+                        id: None,
+                    }],
+                    false => track.artist_refs.clone(),
+                };
+                artists
+                    .iter()
+                    .filter_map(|artist| Blocked::artist(artist, provider))
+                    .enumerate()
+                    .map(|(index, blocked)| {
+                        let name = blocked.name.clone();
+                        let item = block_item(format!("block-artist-{index}"), blocked, cx);
+                        (name, item)
+                    })
+                    .collect::<Vec<_>>()
+            }
+            _ => Vec::new(),
+        };
+        let block_artist = match block_artists.len() {
+            0 => None,
+            1 => block_artists.into_iter().next().map(|(_, item)| item),
+            _ => Some(
+                MenuItem::new("block-artists", t!("menu-block-artist"))
+                    .icon("icons/x.svg")
+                    .submenu(
+                        Menu::new("block-artists-menu").items(
+                            block_artists
+                                .into_iter()
+                                .map(|(name, item)| item.detail(name)),
+                        ),
+                        self.block_artist_submenu.clone(),
+                    ),
+            ),
+        };
+
         sections(
             Menu::new("track-context-menu")
                 .relative()
@@ -506,6 +558,7 @@ impl ItemMenu {
                     .collect(),
                 [next, queue, last].into_iter().chain(radio).collect(),
                 album.into_iter().chain(artist).collect(),
+                block_song.into_iter().chain(block_artist).collect(),
                 details
                     .into_iter()
                     .chain(edit)
@@ -825,6 +878,20 @@ pub(crate) fn artist_menu(
     let nexting = playback.clone();
     let queueing = playback.clone();
     let lasting = playback;
+    let block = Sonora::global(cx)
+        .session
+        .read(cx)
+        .slug_for(&artist_id)
+        .and_then(|provider| {
+            Blocked::artist(
+                &ArtistRef {
+                    name: artist.name.clone(),
+                    id: Some(artist_id.clone()),
+                },
+                provider,
+            )
+        })
+        .map(|blocked| block_item("block-artist", blocked, cx));
 
     let open = match opened_here {
         true => Vec::new(),
@@ -870,6 +937,7 @@ pub(crate) fn artist_menu(
             artist_library_item(artist.clone(), cx)
                 .into_iter()
                 .collect(),
+            block.into_iter().collect(),
             vec![
                 MenuItem::new("copy-artist-link", t!("menu-copy-link"))
                     .icon("icons/link.svg")
@@ -882,6 +950,31 @@ pub(crate) fn artist_menu(
                 .collect(),
         ],
     )
+}
+
+/// The same block toggle is used on songs, credited artists and artist cards.
+fn block_item(id: impl Into<gpui::ElementId>, blocked: Blocked, cx: &App) -> MenuItem {
+    let on = !Sonora::global(cx)
+        .settings
+        .read(cx)
+        .blocked()
+        .iter()
+        .any(|item| item.same(&blocked));
+    let key = match (blocked.kind, on) {
+        (BlockedKind::Song, true) => "menu-block-song",
+        (BlockedKind::Song, false) => "menu-unblock-song",
+        (BlockedKind::Artist, true) => "menu-block-artist",
+        (BlockedKind::Artist, false) => "menu-unblock-artist",
+    };
+    MenuItem::new(id, i18n::lookup(key, None))
+        .icon("icons/x.svg")
+        .checked(!on)
+        .on_click(move |_, _, cx| {
+            let playback = Sonora::global(cx).playback.clone();
+            playback.update(cx, |playback, cx| {
+                playback.set_blocked(blocked.clone(), on, cx)
+            });
+        })
 }
 
 fn artist_library_item(artist: SavedArtist, cx: &App) -> Option<MenuItem> {

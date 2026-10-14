@@ -398,10 +398,46 @@ impl Queue {
     }
 
     fn changed(&mut self, cx: &mut Context<Self>) {
+        self.sift_blocked(cx);
         trim(&mut self.past, PAST_LIMIT);
         self.revision = self.revision.wrapping_add(1);
         self.remember(cx);
         cx.notify();
+    }
+
+    /// Filters every queue run and its source, so shuffle and repeat cannot bring blocks back.
+    fn sift_blocked(&mut self, cx: &Context<Self>) {
+        let settings = self.settings.read(cx);
+        if settings.blocked().is_empty() {
+            return;
+        }
+        let session = self.session.read(cx);
+        let keep = |entry: &Entry| !settings.is_blocked(&entry.track, session);
+        let similar = self
+            .upcoming
+            .range(self.queued()..)
+            .filter(|entry| keep(entry))
+            .count();
+        let manual = self
+            .upcoming
+            .range(..self.manual)
+            .filter(|entry| keep(entry))
+            .count();
+        sift(
+            &mut self.past,
+            &mut self.current,
+            &mut self.upcoming,
+            &mut self.source,
+            keep,
+        );
+        self.manual = manual;
+        self.similar = similar;
+        debug_assert!(self.manual + self.similar <= self.upcoming.len());
+    }
+
+    /// Applies a newly saved block before playback chooses what follows the current track.
+    pub(crate) fn exclude_blocked(&mut self, cx: &mut Context<Self>) {
+        self.changed(cx);
     }
 
     fn blank(&self) -> bool {
@@ -455,7 +491,7 @@ impl Queue {
             .cloned()
             .collect();
         self.changed(cx);
-        self.current().cloned()
+        self.current().cloned().or_else(|| self.next(cx))
     }
 
     fn purge(&mut self, cx: &mut Context<Self>) {
@@ -563,6 +599,11 @@ impl Queue {
         let matches = |entry: &Entry| entry.track.id.as_ref().is_some_and(|id| ids.contains(id));
         let current_removed = self.current.as_ref().is_some_and(matches);
         let before = self.past.len() + usize::from(self.current.is_some()) + self.upcoming.len();
+        self.similar -= self
+            .upcoming
+            .range(self.queued()..)
+            .filter(|entry| matches(entry))
+            .count();
         self.past.retain(|entry| !matches(entry));
         if current_removed {
             self.current = None;
@@ -679,7 +720,7 @@ impl Queue {
         }
         self.past = past;
         self.changed(cx);
-        self.current().cloned()
+        self.current().cloned().or_else(|| self.next(cx))
     }
 
     /// Queues a track after the ones already queued by hand, ahead of the rest of the source.
@@ -1184,6 +1225,46 @@ mod tests {
         assert_eq!(current, Some(4));
         assert_eq!(upcoming, [6]);
         assert_eq!(source, [2, 4, 6]);
+    }
+
+    #[test]
+    fn blocked_tracks_cannot_return_from_history_or_the_shuffle_source() {
+        let blocked = crate::Blocked {
+            provider: "spotify".into(),
+            kind: crate::BlockedKind::Song,
+            id: Some("blocked".into()),
+            name: "Blocked".into(),
+        };
+        let mut past = vec![entry("blocked"), entry("allowed")];
+        let mut current = Some(entry("blocked"));
+        let mut upcoming = VecDeque::from([entry("blocked"), entry("next")]);
+        let mut source = vec![entry("allowed"), entry("blocked"), entry("next")];
+        assert!(sift(
+            &mut past,
+            &mut current,
+            &mut upcoming,
+            &mut source,
+            |entry| !blocked.matches(&entry.track, "spotify")
+        ));
+        assert!(current.is_none());
+        assert_eq!(past.len(), 1);
+        assert_eq!(ids(&upcoming), ["next"]);
+        restore(&mut upcoming, &source, None);
+        assert_eq!(ids(&upcoming), ["allowed", "next"]);
+        scramble(&mut upcoming, &source, None);
+        assert!(
+            upcoming
+                .iter()
+                .all(|entry| !blocked.matches(&entry.track, "spotify"))
+        );
+        assert!(sift(
+            &mut past,
+            &mut current,
+            &mut upcoming,
+            &mut source,
+            |_| false
+        ));
+        assert!(past.is_empty() && current.is_none() && upcoming.is_empty() && source.is_empty());
     }
 
     #[test]

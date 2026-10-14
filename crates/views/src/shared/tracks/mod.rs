@@ -371,7 +371,7 @@ impl TrackSource {
                     let Some(track) = source.tracks(cx).get(at).cloned() else {
                         return;
                     };
-                    playback.update(cx, |playback, _| playback.preload(&track));
+                    playback.update(cx, |playback, cx| playback.preload(&track, cx));
                 }));
                 let provider = self.provider.clone();
                 let table = self.table.clone();

@@ -174,6 +174,8 @@ enum Slot {
     Normalisation,
     Gapless,
     Sleep,
+    Blocked(usize),
+    BlockedEmpty,
     StayAwake,
     Widevine,
     Equalizer,
@@ -637,6 +639,13 @@ impl SettingsView {
                     slots.push(Slot::PreferLocalLyrics);
                 }
                 slots.extend([Slot::Karaoke, Slot::Romanized]);
+                slots.push(Slot::Title("settings-blocked"));
+                match self.settings.read(cx).blocked().is_empty() {
+                    true => slots.push(Slot::BlockedEmpty),
+                    false => {
+                        slots.extend((0..self.settings.read(cx).blocked().len()).map(Slot::Blocked))
+                    }
+                }
                 slots
             }
             SettingsTab::Privacy => {
@@ -779,6 +788,14 @@ impl SettingsView {
             ),
             Slot::Gapless => (t!("settings-gapless"), t!("settings-gapless-detail")),
             Slot::Sleep => (t!("settings-sleep"), t!("settings-sleep-detail")),
+            Slot::Blocked(index) => {
+                let blocked = self.settings.read(cx).blocked().get(index)?;
+                (
+                    blocked.name.clone().into(),
+                    self.blocked_detail(blocked, cx),
+                )
+            }
+            Slot::BlockedEmpty => (t!("settings-blocked"), t!("settings-blocked-empty")),
             Slot::StayAwake => (t!("settings-stay-awake"), t!("settings-stay-awake-detail")),
             Slot::Widevine => {
                 let (detail, _) = widevine_copy(self.drm.read(cx).state());
@@ -995,6 +1012,17 @@ impl SettingsView {
             Slot::Normalisation => self.playback_row(cx).element,
             Slot::Gapless => self.gapless_row(cx).element,
             Slot::Sleep => self.sleep_row(cx).element,
+            Slot::Blocked(index) => self.blocked_row(index, cx),
+            Slot::BlockedEmpty => {
+                self.row(
+                    t!("settings-blocked"),
+                    t!("settings-blocked-empty"),
+                    cx.theme().muted_foreground,
+                    cx.theme().text(Text::Small),
+                    div().into_any_element(),
+                )
+                .element
+            }
             Slot::StayAwake => self.stay_awake_row(cx).element,
             Slot::Widevine => self.widevine_row(cx).element,
             Slot::Equalizer => self.equalizer_row(cx).element,
@@ -2415,6 +2443,46 @@ impl SettingsView {
                 .children(columns)
                 .into_any_element(),
         }
+    }
+
+    fn blocked_detail(&self, blocked: &state::Blocked, cx: &App) -> SharedString {
+        let session = self.session.read(cx);
+        let provider = match blocked.provider == session.local_slug() {
+            true => session.local_provider().name().to_owned(),
+            false => session
+                .providers()
+                .find(|provider| provider.slug == blocked.provider)
+                .map_or_else(
+                    || blocked.provider.clone(),
+                    |provider| provider.name.to_owned(),
+                ),
+        };
+        let kind = i18n::lookup(blocked.kind.key(), None);
+        t!("settings-blocked-item", kind = &kind, provider = provider)
+    }
+
+    fn blocked_row(&self, index: usize, cx: &mut Context<Self>) -> AnyElement {
+        let Some(blocked) = self.settings.read(cx).blocked().get(index).cloned() else {
+            return div().into_any_element();
+        };
+        let theme = *cx.theme();
+        let detail = self.blocked_detail(&blocked, cx);
+        let title = blocked.name.clone().into();
+        self.row(
+            title,
+            detail,
+            theme.muted_foreground,
+            theme.text(Text::Small),
+            Button::new(("unblock", index))
+                .label(t!("settings-unblock"))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.playback.update(cx, |playback, cx| {
+                        playback.set_blocked(blocked.clone(), false, cx)
+                    });
+                }))
+                .into_any_element(),
+        )
+        .element
     }
 
     fn sleep_row(&self, cx: &mut Context<Self>) -> Setting {

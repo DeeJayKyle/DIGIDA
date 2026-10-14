@@ -570,8 +570,93 @@ impl Playback {
 
     /// Fetches a track ahead, as when the pointer rests on its row, so playing it starts at
     /// once. Asked once per track; the current track is never preloaded.
-    pub fn preload(&mut self, track: &Track) {
+    pub fn preload(&mut self, track: &Track, cx: &Context<Self>) {
+        if self.is_blocked(track, cx) {
+            return;
+        }
         self.preload_internal(track, false);
+    }
+
+    fn is_blocked(&self, track: &Track, cx: &App) -> bool {
+        self.settings
+            .read(cx)
+            .is_blocked(track, self.session.read(cx))
+    }
+
+    /// Persists a block and applies it to the queue and any audio already lined up gaplessly.
+    pub fn set_blocked(&mut self, blocked: crate::Blocked, on: bool, cx: &mut Context<Self>) {
+        if let Err(error) = self
+            .settings
+            .update(cx, |settings, cx| settings.set_blocked(blocked, on, cx))
+        {
+            log::error!("playback: cannot save blocked items: {error:#}");
+            Toasts::show(Outcome::Failed, "toast-block-failed", cx);
+            return;
+        }
+        Toasts::show(
+            Outcome::Done,
+            match on {
+                true => "toast-blocked",
+                false => "toast-unblocked",
+            },
+            cx,
+        );
+        if !on {
+            return;
+        }
+        let current_blocked = self
+            .track
+            .as_ref()
+            .is_some_and(|track| self.is_blocked(track, cx));
+        let queued_audio_blocked = self.preloaded.is_some() && {
+            self.queue
+                .read(cx)
+                .upcoming()
+                .chain(self.queue.read(cx).similar())
+                .any(|track| self.is_blocked(track, cx))
+        };
+        self.queue.update(cx, |queue, cx| queue.exclude_blocked(cx));
+        if current_blocked {
+            let playing = self.wants_playing();
+            self.clear_playback(cx);
+            self.suggest = None;
+            self.seeded = None;
+            if !self.queue.read(cx).has_next() {
+                self.leave_station();
+            }
+            match playing {
+                true => self.follow_queue(Start::Pick, cx),
+                false => self.hold_next(cx),
+            }
+        } else if queued_audio_blocked {
+            // Reloading without a segue clears audio the engine already queued for a blocked song.
+            let playing = self.wants_playing();
+            let at = self.live_position();
+            self.reload_and_seek(at, cx);
+            if !playing {
+                self.pause(cx);
+            }
+        }
+        cx.notify();
+    }
+
+    /// Cancels a pending load and leaves no track that the play button could resume.
+    fn clear_playback(&mut self, cx: &mut Context<Self>) {
+        self.pause(cx);
+        self.load = None;
+        self.fetch = None;
+        self.track = None;
+        self.preloaded = None;
+        self.resume_at = None;
+        self.resume_ready = false;
+        self.seek_in_flight = None;
+        self.seek_next = None;
+        self.seek_target = None;
+        self.state = PlaybackState::Idle;
+        self.position = Duration::ZERO;
+        self.clock.reset(Duration::ZERO, false);
+        cx.emit(PlaybackEvent::EndedPlayback);
+        cx.notify();
     }
 
     fn preload_internal(&mut self, track: &Track, segue: bool) {
@@ -613,6 +698,10 @@ impl Playback {
     /// Loading from here until the engine reports audio; a refusal or an unplayable track fails
     /// without reaching the engine.
     fn load_from(&mut self, track: &Track, at: Duration, start: Start, cx: &mut Context<Self>) {
+        if self.is_blocked(track, cx) {
+            Toasts::show(Outcome::Failed, "toast-track-blocked", cx);
+            return;
+        }
         let Some(id) = track.id.clone() else {
             return self.failed(format!("{} has no track id", track.name), cx);
         };
@@ -730,6 +819,10 @@ impl Playback {
 
     /// Plays `seed` now and fills the queue behind it with its radio once that arrives.
     pub fn play_radio(&mut self, seed: &Track, cx: &mut Context<Self>) {
+        if self.is_blocked(seed, cx) {
+            Toasts::show(Outcome::Failed, "toast-track-blocked", cx);
+            return;
+        }
         let Some(id) = seed.id.clone() else {
             return self.failed(format!("{} has no track id", seed.name), cx);
         };
@@ -789,6 +882,10 @@ impl Playback {
 
     /// Appends a track, or starts playing it when nothing is queued.
     pub fn enqueue(&mut self, track: Track, cx: &mut Context<Self>) {
+        if self.is_blocked(&track, cx) {
+            Toasts::show(Outcome::Failed, "toast-track-blocked", cx);
+            return;
+        }
         if self.queue.read(cx).current().is_none() {
             self.begin(vec![track], 0, None, cx);
             return;
@@ -800,6 +897,10 @@ impl Playback {
     }
 
     pub fn play_next(&mut self, track: Track, cx: &mut Context<Self>) {
+        if self.is_blocked(&track, cx) {
+            Toasts::show(Outcome::Failed, "toast-track-blocked", cx);
+            return;
+        }
         if self.queue.read(cx).current().is_none() {
             self.begin(vec![track], 0, None, cx);
             return;
@@ -848,6 +949,10 @@ impl Playback {
 
     /// Queues a track after everything already lined up, or starts playing it when nothing is.
     pub fn play_last(&mut self, track: Track, cx: &mut Context<Self>) {
+        if self.is_blocked(&track, cx) {
+            Toasts::show(Outcome::Failed, "toast-track-blocked", cx);
+            return;
+        }
         if self.queue.read(cx).current().is_none() {
             self.begin(vec![track], 0, None, cx);
             return;
@@ -1188,10 +1293,16 @@ impl Playback {
         origin: Option<Origin>,
         cx: &mut Context<Self>,
     ) {
+        let has_blocked = tracks.iter().any(|track| self.is_blocked(track, cx));
         let Some(track) = self
             .queue
             .update(cx, |queue, cx| queue.start(tracks, index, origin, cx))
         else {
+            if has_blocked && self.queue.read(cx).current().is_none() {
+                self.clear_playback(cx);
+                self.leave_station();
+                Toasts::show(Outcome::Failed, "toast-track-blocked", cx);
+            }
             return;
         };
         self.leave_station();
@@ -1380,7 +1491,8 @@ impl Playback {
                     return;
                 }
                 match loaded {
-                    Ok((tracks, next)) => {
+                    Ok((mut tracks, next)) => {
+                        tracks.retain(|track| !this.is_blocked(track, cx));
                         this.dry = match tracks.is_empty() {
                             true => this.dry.saturating_add(1),
                             false => 0,
@@ -1747,9 +1859,14 @@ impl Playback {
             return;
         };
 
+        let restored_id = resume.current.as_ref().map(|track| track.id.clone());
         let at = Duration::from_secs_f32(resume.position.max(0.));
         let Some(track) = self.queue.update(cx, |queue, cx| queue.revive(resume, cx)) else {
             return;
+        };
+        let at = match track.id == restored_id {
+            true => at,
+            false => Duration::ZERO,
         };
         self.track = Some(track);
         self.state = PlaybackState::Paused;
