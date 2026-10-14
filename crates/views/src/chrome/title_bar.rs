@@ -4,7 +4,7 @@ use gpui::prelude::*;
 use gpui::{AnyElement, Window, div};
 use gpui::{
     AnyView, Context, Entity, EventEmitter, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, Pixels, Render,
+    MouseUpEvent, Pixels, Render, SharedString,
 };
 use ui::TrafficLightControls;
 use ui::WindowControls;
@@ -12,7 +12,7 @@ use ui::{ActiveTheme as _, Button};
 
 use crate::chrome::SidebarRight;
 use router::Navigation;
-use state::{AppSettings, Sonora};
+use state::{AppSettings, Session, Sonora};
 
 const SYSTEM_ZOOMS: bool = cfg!(target_os = "windows");
 
@@ -67,6 +67,7 @@ pub(crate) enum TitleBarEvent {
 pub(crate) struct TitleBar {
     navigation: Entity<Navigation>,
     settings: Entity<AppSettings>,
+    session: Entity<Session>,
     options: TitleBarOptions,
     grabbed: bool,
 }
@@ -77,12 +78,15 @@ impl TitleBar {
     pub fn new(cx: &mut Context<Self>) -> Self {
         let navigation = router::trail(cx);
         let settings = Sonora::global(cx).settings.clone();
+        let session = Sonora::global(cx).session.clone();
 
         cx.observe(&navigation, |_, _, cx| cx.notify()).detach();
         cx.observe(&settings, |_, _, cx| cx.notify()).detach();
+        cx.observe(&session, |_, _, cx| cx.notify()).detach();
         Self {
             navigation,
             settings,
+            session,
             options: TitleBarOptions::default(),
             grabbed: false,
         }
@@ -204,6 +208,21 @@ impl Render for TitleBar {
         let content = self.options.content.clone();
         let window_fullscreen = window.is_fullscreen();
         let settings = self.settings.read(cx);
+        let switcher = if settings.provider_shortcuts() && !self.session.read(cx).is_pending() {
+            let providers = self
+                .session
+                .read(cx)
+                .providers()
+                .filter(|provider| provider.stored && !provider.guest)
+                .map(|provider| (provider.slug, provider.name, provider.active))
+                .collect::<Vec<_>>();
+            match providers.len() > 1 {
+                true => providers,
+                false => Vec::new(),
+            }
+        } else {
+            Vec::new()
+        };
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         let controls =
             matches!(window.window_decorations(), Decorations::Client { .. }) && !window_fullscreen;
@@ -287,6 +306,33 @@ impl Render for TitleBar {
                     .gap_1()
                     .items_center()
                     .when(navigation, |this| this.child(self.history(cx)))
+                    .when(!switcher.is_empty(), |this| {
+                        this.child(
+                            div()
+                                .flex()
+                                .flex_1()
+                                .justify_center()
+                                .items_center()
+                                .gap_1()
+                                .children(switcher.into_iter().map(|(slug, name, active)| {
+                                    Button::new(SharedString::from(format!(
+                                        "provider-shortcut-{slug}"
+                                    )))
+                                    .ghost()
+                                    .small()
+                                    .icon(crate::shared::provider_logo(slug))
+                                    .tooltip(i18n::t!(
+                                        "settings-provider-shortcut",
+                                        provider = name
+                                    ))
+                                    .selected(active)
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.session
+                                            .update(cx, |session, cx| session.switch(slug, cx));
+                                    }))
+                                })),
+                        )
+                    })
                     .children(content)
                     .pr_3(),
             )

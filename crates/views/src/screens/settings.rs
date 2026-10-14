@@ -180,6 +180,7 @@ enum Slot {
     EqualizerPreset,
     EqualizerBands,
     LyricsProviders,
+    ProviderShortcuts,
     PreferLocalLyrics,
     Karaoke,
     Romanized,
@@ -623,7 +624,12 @@ impl SettingsView {
                 if self.drm.read(cx).shown(cx) {
                     slots.push(Slot::Widevine);
                 }
-                slots.extend([Slot::Title("settings-group-equalizer"), Slot::Equalizer]);
+                slots.extend([
+                    Slot::Title("settings-group-shortcuts"),
+                    Slot::ProviderShortcuts,
+                    Slot::Title("settings-group-equalizer"),
+                    Slot::Equalizer,
+                ]);
                 if self.playback.read(cx).equalizer() {
                     slots.push(Slot::EqualizerPreset);
                     slots.push(Slot::EqualizerBands);
@@ -793,6 +799,10 @@ impl SettingsView {
             Slot::LyricsProviders => (
                 t!("settings-lyrics-providers"),
                 t!("settings-lyrics-providers-detail"),
+            ),
+            Slot::ProviderShortcuts => (
+                t!("settings-provider-shortcuts"),
+                t!("settings-provider-shortcuts-detail"),
             ),
             Slot::PreferLocalLyrics => (
                 t!("settings-prefer-local-lyrics"),
@@ -1001,6 +1011,7 @@ impl SettingsView {
             Slot::EqualizerPreset => self.equalizer_preset_row(cx).element,
             Slot::EqualizerBands => self.equalizer_bands_row(cx).element,
             Slot::LyricsProviders => self.lyrics_providers_row(cx).element,
+            Slot::ProviderShortcuts => self.provider_shortcuts_row(cx).element,
             Slot::PreferLocalLyrics => self.prefer_local_lyrics_row(cx).element,
             Slot::Karaoke => self.karaoke_lyrics_row(cx).element,
             Slot::Romanized => self.romanized_lyrics_row(cx).element,
@@ -2976,6 +2987,26 @@ impl SettingsView {
             theme.muted_foreground,
             theme.text(Text::Small),
             picker.into_any_element(),
+        )
+    }
+
+    fn provider_shortcuts_row(&self, cx: &mut Context<Self>) -> Setting {
+        let theme = *cx.theme();
+        let muted = theme.muted_foreground;
+        let small = theme.text(Text::Small);
+        let on = self.settings.read(cx).provider_shortcuts();
+
+        self.row(
+            t!("settings-provider-shortcuts"),
+            t!("settings-provider-shortcuts-detail"),
+            muted,
+            small,
+            Switch::new("provider-shortcuts", on)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.settings
+                        .update(cx, |settings, cx| settings.set_provider_shortcuts(!on, cx));
+                }))
+                .into_any_element(),
         )
     }
 
