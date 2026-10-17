@@ -24,6 +24,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Copy link tells you it worked. Where there is no link to copy, the entry is greyed out and
   says why.
 - Sonora tells you when a library scan you started has finished.
+- Scripts, Stream Decks and stream overlays can now read what is playing and control playback,
+  volume, lyrics and the queue through `sonora-api://` links or the local instance socket.
 
 ### Changed
 

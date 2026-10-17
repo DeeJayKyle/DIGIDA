@@ -30,6 +30,7 @@
 			<key>CFBundleURLSchemes</key>
 			<array>
 				<string>spotify</string>
+				<string>sonora-api</string>
 			</array>
 		</dict>
 	</array>

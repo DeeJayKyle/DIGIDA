@@ -1681,6 +1681,18 @@ impl Playback {
         if self.restarts(cx) {
             return self.seek(Duration::ZERO, cx);
         }
+        self.previous_track(cx);
+    }
+
+    /// Steps back to the previous track in the queue regardless of how far the current one has
+    /// played, or restarts the current track when the queue has no history before it.
+    pub fn previous_track(&mut self, cx: &mut Context<Self>) {
+        if !self.queue.read(cx).has_previous() {
+            if self.track.is_some() {
+                self.seek(Duration::ZERO, cx);
+            }
+            return;
+        }
         self.fetch = None;
         let start = self.burst();
         let Some(track) = self.queue.update(cx, |queue, cx| queue.previous(cx)) else {

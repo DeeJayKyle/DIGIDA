@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod actions;
+mod api;
 mod assets;
 mod dock;
 mod http;
@@ -50,13 +51,15 @@ fn main() {
         }
         return;
     }
-    logging::init();
 
     let args: Vec<String> = std::env::args()
         .skip(1)
         .filter(|arg| !arg.starts_with('-'))
         .collect();
-    let (sender, mut links) = tokio::sync::mpsc::unbounded_channel::<Vec<String>>();
+    if api::extract(&args).is_none() {
+        logging::init();
+    }
+    let (sender, mut links) = tokio::sync::mpsc::unbounded_channel::<single::Message>();
     match single::claim(&args, sender.clone()) {
         single::Instance::First => {}
         single::Instance::Running => return,
@@ -89,7 +92,23 @@ fn main() {
         .with_http_client(Arc::new(http::Client::new(io.handle())));
     let opened_urls_sender = sender.clone();
     app.on_open_urls(move |opened| {
-        opened_urls_sender.send(opened).ok();
+        let mut files = Vec::new();
+        for item in opened {
+            match api::is_uri(&item) {
+                true => {
+                    opened_urls_sender
+                        .send(single::Message::Api {
+                            uri: item,
+                            reply: None,
+                        })
+                        .ok();
+                }
+                false => files.push(item),
+            }
+        }
+        if !files.is_empty() {
+            opened_urls_sender.send(single::Message::Open(files)).ok();
+        }
     });
     app.on_reopen(show_window);
 
@@ -180,23 +199,40 @@ fn main() {
         // A cold "Open With" launch reaches Playback through the same batch a hot hand-off
         // uses, now that state exists to open the files into.
         if !opened_a_destination && !args.is_empty() {
-            sender.send(args.clone()).ok();
+            sender.send(single::Message::Open(args.clone())).ok();
         }
 
         cx.spawn(async move |cx| {
             let mut pending: Vec<String> = Vec::new();
             loop {
                 match links.recv().await {
-                    Some(items) => pending.extend(items),
+                    Some(single::Message::Open(items)) => pending.extend(items),
+                    Some(single::Message::Api { uri, reply }) => {
+                        let response = cx.update(|cx| api::handle(&uri, cx));
+                        if let Some(reply) = reply {
+                            let _ = reply.send(response);
+                        }
+                        continue;
+                    }
                     None => break,
                 }
                 // Drain whatever else arrives in the same burst before acting on any of it.
                 loop {
                     cx.background_executor().timer(OPEN_COALESCE).await;
                     let mut more = false;
-                    while let Ok(items) = links.try_recv() {
-                        pending.extend(items);
-                        more = true;
+                    while let Ok(message) = links.try_recv() {
+                        match message {
+                            single::Message::Open(items) => {
+                                pending.extend(items);
+                                more = true;
+                            }
+                            single::Message::Api { uri, reply } => {
+                                let response = cx.update(|cx| api::handle(&uri, cx));
+                                if let Some(reply) = reply {
+                                    let _ = reply.send(response);
+                                }
+                            }
+                        }
                     }
                     if !more {
                         break;
