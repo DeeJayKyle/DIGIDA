@@ -29,6 +29,8 @@ views.workspace = true
 webview.workspace = true
 reqwest.workspace = true
 rustls.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 sha2.workspace = true
 tokio = { workspace = true, features = ["rt"] }
 interprocess.workspace = true

@@ -221,6 +221,16 @@ Root: HKA; Subkey: "Software\Classes\SonoraSpotify"; ValueType: string; ValueNam
 Root: HKA; Subkey: "Software\Classes\SonoraSpotify"; ValueType: string; ValueName: "URL Protocol"; ValueData: ""
 Root: HKA; Subkey: "Software\Classes\SonoraSpotify\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\{#AppExeName},0"
 Root: HKA; Subkey: "Software\Classes\SonoraSpotify\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExeName}"" ""%1"""
+; sonora-api
+Root: HKA; Subkey: "Software\Sonora\Capabilities\UrlAssociations"; ValueType: string; ValueName: "sonora-api"; ValueData: "SonoraApi"; Flags: uninsdeletevalue
+Root: HKA; Subkey: "Software\Classes\SonoraApi"; ValueType: string; ValueName: ""; ValueData: "Sonora API Command"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\SonoraApi"; ValueType: string; ValueName: "URL Protocol"; ValueData: ""
+Root: HKA; Subkey: "Software\Classes\SonoraApi\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\{#AppExeName},0"
+Root: HKA; Subkey: "Software\Classes\SonoraApi\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExeName}"" ""%1"""
+Root: HKA; Subkey: "Software\Classes\sonora-api"; ValueType: string; ValueName: ""; ValueData: "URL:Sonora API Command"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\sonora-api"; ValueType: string; ValueName: "URL Protocol"; ValueData: ""
+Root: HKA; Subkey: "Software\Classes\sonora-api\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\{#AppExeName},0"
+Root: HKA; Subkey: "Software\Classes\sonora-api\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExeName}"" ""%1"""
 
 ; Setup runs elevated, and a [Run] entry inherits that unless it says otherwise: postinstall
 ; entries default to runasoriginaluser, the relaunch after a silent update does not, and an
