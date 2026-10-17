@@ -209,7 +209,8 @@ fn mib(bytes: usize) -> String {
 
 /// Drops the clean pages of every read-only file mapping from the resident set: code and data of
 /// the executable and its libraries that startup touched once. Whatever is still in use faults
-/// back in on its next access. A mapping holding any copied-on-write page is skipped.
+/// back in on its next access. A mapping holding any copied-on-write page, resident or swapped, is
+/// skipped.
 ///
 /// The executable and the GPU drivers lose their page table entries outright, which leaves the
 /// pages in the page cache even when another process maps them too. A driver is held open while
@@ -241,7 +242,13 @@ fn shed() {
             });
             continue;
         }
-        let Some(rest) = line.strip_prefix("Anonymous:") else {
+        if let Some(rest) = line.strip_prefix("Anonymous:") {
+            if rest.split_whitespace().next() != Some("0") {
+                current = None;
+            }
+            continue;
+        }
+        let Some(rest) = line.strip_prefix("Swap:") else {
             continue;
         };
         let Some((start, end, path)) = current.take() else {
