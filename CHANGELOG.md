@@ -48,6 +48,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - On Linux, Sonora no longer closes on its own after playing for a while.
 - The Nix flake can build Sonora from source again, as `packages.<system>.sonora-src`.
   The default package is still the release binary.
+- The song details of a local file now show its release year, genres, label, language and composer
+  from the file's tags.
 
 ## [0.43.0] - 2026-10-13
 
