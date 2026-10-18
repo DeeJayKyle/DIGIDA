@@ -11,6 +11,7 @@ const SCHEME: &str = "sonora-api://";
 const DEFAULT_QUEUE_LIMIT: usize = 10;
 const MAX_QUEUE_LIMIT: usize = 50;
 const DEFAULT_UNMUTE_VOLUME: f32 = 0.5;
+const MAX_SEEK: Duration = Duration::from_secs(u32::MAX as u64);
 
 /// Remembers the volume level from before the last API mute so unmuting restores it.
 struct MuteMemory(f32);
@@ -128,6 +129,11 @@ pub fn is_uri(value: &str) -> bool {
     value.trim().starts_with(SCHEME)
 }
 
+/// Whether `response` is a JSON envelope with `"ok":true`.
+pub fn is_ok(response: &str) -> bool {
+    response.trim().starts_with(r#"{"ok":true"#)
+}
+
 /// Returns the first `sonora-api://` URI found in `args`.
 pub fn extract(args: &[String]) -> Option<&str> {
     args.iter()
@@ -139,6 +145,16 @@ pub fn extract(args: &[String]) -> Option<&str> {
 /// The JSON error returned when an API command is invoked while no Sonora instance is running.
 pub fn not_running() -> String {
     error_json("sonora is not running")
+}
+
+/// The JSON error returned when an API command times out waiting for the main thread.
+pub fn timed_out() -> String {
+    error_json("request timed out")
+}
+
+/// The JSON error returned when an API command exceeds the maximum URI length.
+pub fn uri_too_long() -> String {
+    error_json("request uri too long")
 }
 
 /// Executes a `sonora-api://` request against the live app state and returns a single-line JSON
@@ -272,7 +288,12 @@ fn handle_mute(params: &HashMap<String, String>, cx: &mut App) -> String {
 fn handle_seek(params: &HashMap<String, String>, cx: &mut App) -> String {
     let playback = Sonora::global(cx).playback.clone();
     if let Some(raw) = params.get("fraction").or_else(|| params.get("progress")) {
-        let Some(fraction) = raw.trim().parse::<f32>().ok().filter(|v| v.is_finite()) else {
+        let Some(fraction) = raw
+            .trim()
+            .parse::<f32>()
+            .ok()
+            .filter(|v| v.is_finite() && (0.0..=1.0).contains(v))
+        else {
             return error_json(format!("invalid seek fraction: {raw}"));
         };
         playback.update(cx, |playback, cx| playback.seek_fraction(fraction, cx));
@@ -286,31 +307,61 @@ fn handle_seek(params: &HashMap<String, String>, cx: &mut App) -> String {
         .map(|track| track.duration)
         .unwrap_or(Duration::ZERO);
 
+    match resolve_seek_target(params, current, duration) {
+        Ok(target) => {
+            playback.update(cx, |playback, cx| playback.seek(target, cx));
+            ok_json(status_snapshot(cx))
+        }
+        Err(reason) => error_json(reason),
+    }
+}
+
+fn resolve_seek_target(
+    params: &HashMap<String, String>,
+    current: Duration,
+    duration: Duration,
+) -> Result<Duration, String> {
     let target = if let Some(raw) = params.get("ms") {
-        let Ok(ms) = raw.trim().parse::<u64>() else {
-            return error_json(format!("invalid seek ms: {raw}"));
+        let Some(target) = raw
+            .trim()
+            .parse::<u64>()
+            .ok()
+            .map(Duration::from_millis)
+            .filter(|&target| target <= MAX_SEEK)
+        else {
+            return Err(format!("invalid seek ms: {raw}"));
         };
-        Duration::from_millis(ms)
+        target
     } else if let Some(raw) = params
         .get("set")
         .or_else(|| params.get("position"))
         .or_else(|| params.get("seconds"))
     {
-        let Some(secs) = parse_signed_f64(raw).filter(|&secs| secs >= 0.) else {
-            return error_json(format!("invalid seek position: {raw}"));
+        let Some(target) = parse_signed_f64(raw)
+            .and_then(|secs| Duration::try_from_secs_f64(secs).ok())
+            .filter(|&target| target <= MAX_SEEK)
+        else {
+            return Err(format!("invalid seek position: {raw}"));
         };
-        Duration::from_secs_f64(secs)
+        target
     } else if let Some(raw) = params.get("delta").or_else(|| params.get("step")) {
         let Some(delta) = parse_signed_f64(raw) else {
-            return error_json(format!("invalid seek delta: {raw}"));
+            return Err(format!("invalid seek delta: {raw}"));
+        };
+        let Some(step) = Duration::try_from_secs_f64(delta.abs())
+            .ok()
+            .filter(|&step| step <= MAX_SEEK)
+        else {
+            return Err(format!("invalid seek delta: {raw}"));
         };
         match delta >= 0. {
-            true => current.saturating_add(Duration::from_secs_f64(delta)),
-            false => current.saturating_sub(Duration::from_secs_f64(-delta)),
+            true => current.saturating_add(step).min(MAX_SEEK),
+            false => current.saturating_sub(step),
         }
     } else {
-        return error_json(
-            "seek requires ?set=<seconds>, ?ms=<ms>, ?delta=<seconds>, or ?fraction=<0..1>",
+        return Err(
+            "seek requires ?set=<seconds>, ?ms=<ms>, ?delta=<seconds>, or ?fraction=<0..1>"
+                .to_owned(),
         );
     };
 
@@ -318,8 +369,7 @@ fn handle_seek(params: &HashMap<String, String>, cx: &mut App) -> String {
         true => target,
         false => target.min(duration),
     };
-    playback.update(cx, |playback, cx| playback.seek(clamped, cx));
-    ok_json(status_snapshot(cx))
+    Ok(clamped)
 }
 
 fn handle_shuffle(params: &HashMap<String, String>, cx: &mut App) -> String {
@@ -705,5 +755,43 @@ mod tests {
         assert_eq!(params.get("delta").map(String::as_str), Some("+5"));
         assert_eq!(params.get("force").map(String::as_str), Some("true"));
         assert_eq!(params.get("mode").map(String::as_str), Some("toggle"));
+    }
+
+    #[test]
+    fn resolves_seek_and_rejects_extreme_values() {
+        let current = Duration::from_secs(30);
+        let duration = Duration::from_secs(180);
+
+        assert_eq!(
+            resolve_seek_target(&parse_query("set=45.5"), current, duration),
+            Ok(Duration::from_millis(45_500))
+        );
+        assert_eq!(
+            resolve_seek_target(&parse_query("delta=%2B15"), current, duration),
+            Ok(Duration::from_secs(45))
+        );
+        assert_eq!(
+            resolve_seek_target(&parse_query("delta=-45"), current, duration),
+            Ok(Duration::ZERO)
+        );
+        assert_eq!(
+            resolve_seek_target(&parse_query("ms=999999"), current, duration),
+            Ok(duration)
+        );
+
+        assert!(resolve_seek_target(&parse_query("set=1e300"), current, duration).is_err());
+        assert!(resolve_seek_target(&parse_query("set=-10"), current, duration).is_err());
+        assert!(resolve_seek_target(&parse_query("delta=1e300"), current, duration).is_err());
+        assert!(resolve_seek_target(&parse_query("delta=-1e300"), current, duration).is_err());
+        assert!(resolve_seek_target(&parse_query("set=inf"), current, duration).is_err());
+        assert!(resolve_seek_target(&parse_query("set=NaN"), current, duration).is_err());
+    }
+
+    #[test]
+    fn detects_ok_and_error_envelopes() {
+        assert!(is_ok(&ok_json(42)));
+        assert!(!is_ok(&not_running()));
+        assert!(!is_ok(&timed_out()));
+        assert!(!is_ok(&uri_too_long()));
     }
 }

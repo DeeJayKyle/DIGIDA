@@ -97,10 +97,7 @@ fn main() {
             match api::is_uri(&item) {
                 true => {
                     opened_urls_sender
-                        .send(single::Message::Api {
-                            uri: item,
-                            reply: None,
-                        })
+                        .send(single::Message::Api(single::ApiRequest::detached(item)))
                         .ok();
                 }
                 false => files.push(item),
@@ -207,10 +204,10 @@ fn main() {
             loop {
                 match links.recv().await {
                     Some(single::Message::Open(items)) => pending.extend(items),
-                    Some(single::Message::Api { uri, reply }) => {
-                        let response = cx.update(|cx| api::handle(&uri, cx));
-                        if let Some(reply) = reply {
-                            let _ = reply.send(response);
+                    Some(single::Message::Api(request)) => {
+                        if let Some(uri) = request.take() {
+                            let response = cx.update(|cx| api::handle(uri, cx));
+                            request.respond(response);
                         }
                         continue;
                     }
@@ -226,10 +223,10 @@ fn main() {
                                 pending.extend(items);
                                 more = true;
                             }
-                            single::Message::Api { uri, reply } => {
-                                let response = cx.update(|cx| api::handle(&uri, cx));
-                                if let Some(reply) = reply {
-                                    let _ = reply.send(response);
+                            single::Message::Api(request) => {
+                                if let Some(uri) = request.take() {
+                                    let response = cx.update(|cx| api::handle(uri, cx));
+                                    request.respond(response);
                                 }
                             }
                         }
