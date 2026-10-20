@@ -3,20 +3,38 @@ use std::time::Duration;
 use gpui::App;
 use state::Sonora;
 
-const INTERVAL: Duration = Duration::from_secs(30);
+/// How often the footprint is logged under debug logging.
+const INTERVAL: Duration = Duration::from_secs(10);
 
+/// Keeps glibc to one malloc arena and sends every block of 256 KiB or more straight to mmap.
+/// Every arena holds on to the holes its own threads leave, so one shared arena reuses them where
+/// several would each keep their own. Call it first thing in `main`, before any thread exists.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+pub fn tune() {
+    unsafe {
+        libc::mallopt(libc::M_ARENA_MAX, 1);
+        libc::mallopt(libc::M_MMAP_THRESHOLD, 256 * 1024);
+        libc::mallopt(libc::M_TRIM_THRESHOLD, 1024 * 1024);
+    }
+}
+
+#[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+pub fn tune() {}
+
+/// Logs the memory footprint every `INTERVAL` while debug logging is on, and does nothing
+/// otherwise.
 pub fn watch(cx: &mut App) {
+    if !log::log_enabled!(log::Level::Debug) {
+        return;
+    }
     cx.spawn(async move |cx| {
         loop {
             cx.background_executor().timer(INTERVAL).await;
-            if log::log_enabled!(log::Level::Debug) {
-                let probed = cx
-                    .background_executor()
-                    .spawn(async { (footprint().unwrap_or_default(), resident()) })
-                    .await;
-                cx.update(|cx| report(probed, cx));
-            }
-            cx.background_executor().spawn(async { release() }).detach();
+            let probed = cx
+                .background_executor()
+                .spawn(async { (footprint().unwrap_or_default(), resident()) })
+                .await;
+            cx.update(|cx| report(probed, cx));
         }
     })
     .detach();
@@ -163,14 +181,6 @@ Rss:                 128 kB
 fn mib(bytes: usize) -> String {
     format!("{:.1} MiB", bytes as f64 / (1024. * 1024.))
 }
-
-#[cfg(all(target_os = "linux", target_env = "gnu"))]
-fn release() {
-    unsafe { libc::malloc_trim(0) };
-}
-
-#[cfg(not(all(target_os = "linux", target_env = "gnu")))]
-fn release() {}
 
 #[cfg(target_os = "linux")]
 fn resident() -> Option<usize> {

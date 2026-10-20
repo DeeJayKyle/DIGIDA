@@ -2,8 +2,10 @@ mod artist;
 mod catalog;
 mod cover;
 mod detail;
+mod devices;
 mod discord;
 mod drm;
+mod equalizer;
 mod genre;
 mod history;
 mod home;
@@ -12,58 +14,75 @@ mod logging;
 mod lyrics;
 mod mosaic;
 mod network;
+mod outputs;
+mod overload;
 mod pins;
 mod playback;
+mod potoken;
 mod profile;
 mod queue;
 mod remote;
+mod requirements;
 mod scan;
 mod scrobble;
 mod search;
 mod session;
 mod settings;
 mod sheets;
+mod signal;
 mod snapshot;
 mod song;
 mod tags;
 mod toast;
 mod updates;
 mod usage;
+mod wake;
 mod window_shape;
 
-pub use artist::ArtistDetail;
+pub use artist::{ArtistDetail, ArtistDetailEvent};
 pub use cover::Cover;
 pub use detail::{Collection, Detail, Header};
+pub use devices::{Devices, Steered, Upcoming};
 pub use drm::{CdmState, Drm};
+pub use equalizer::{DeviceRule, Equalizer, RuleDevice, Sound};
 pub use genre::{GenreDetails, Genres};
 pub use history::{History, HistoryState};
 pub use home::Home;
-pub use library::{Library, LibraryEvent, LibraryPart, LibraryState, Problem, Ready, Shelf};
+pub use library::{
+    Addition, Library, LibraryEvent, LibraryPart, LibraryState, Problem, Ready, Shelf,
+};
 pub use logging::log_file;
 pub use lyrics::{Lyrics, LyricsState};
 pub use network::{Network, Reconnected};
+pub use outputs::Outputs;
+pub use overload::OutputLevel;
 pub use pins::{PinSort, Pins};
 pub use playback::{Origin, Playback, PlaybackState, Repeat, Sleep, Whence};
 pub use profile::Profile;
 pub use queue::{Named, Queue, Resume, Stub};
 pub use remote::{Remote, attach as attach_remote};
+pub use requirements::{Requirement, Requirements};
 pub use scan::Scan;
 pub use scrobble::{ScrobbleRow, ScrobbleState, Scrobbling};
 pub use search::{AlbumHit, ArtistHit, Hit, Kind, PlaylistHit, Search};
 pub use session::{Failure, ProviderInfo, Session, SessionEvent, SessionState};
 pub use settings::{
-    AppSettings, DiscordName, FilterValue, FullscreenControlsAutohide, RomanizationScripts,
-    SYSTEM_FONT, SideTab, remember_window, window_placement,
+    AppSettings, ConnectName, DiscordName, FilterValue, FullscreenControlsAutohide, LYRICS_SOURCES,
+    PlayerBarLayout, Reloaded, RomanizationScripts, SYSTEM_FONT, SideTab, ThemeFamily,
+    ThemeVariant, equalizer_profile_label, remember_window, window_placement,
 };
+pub use signal::{Change, Equalizing, FLOAT_BITS, Following, Signal, SignalPath};
 pub use song::SongDetail;
 pub use tags::{TagState, Tags};
-pub use toast::{Outcome, Target, Toast, Toasts};
+pub use toast::{Outcome, Target, Toast, ToastAction, Toasts};
 pub use updates::{Release, UpdateState, Updates};
 pub use usage::Usage;
+pub use wake::Wake;
 pub use window_shape::{apply_window_rounding, install_rounded_window_hook};
 
 use std::future::Future;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
 use gpui::{App, AppContext as _, Entity, Global};
@@ -80,15 +99,20 @@ impl Global for Io {}
 /// answer with, never a long computation, so the default of one worker per core buys nothing
 /// and costs a stack and an allocator arena each.
 const WORKERS: usize = 4;
-/// The ceiling on blocking threads, which is where the sqlite reads and the tag writes go. The
-/// default is 512, far past anything Sonora queues at once.
-const BLOCKING: usize = 16;
+/// The ceiling on blocking threads, which is where the sqlite reads, the artwork disk cache and
+/// DNS lookups go. The artwork cache sits behind one lock, so threads past a handful only queue
+/// on it while each holds a stack and an allocator arena. The default is 512.
+const BLOCKING: usize = 8;
+/// How long an idle blocking thread lingers before it exits. A burst of cover reads should not
+/// leave its threads parked for the default ten seconds.
+const LINGER: Duration = Duration::from_secs(2);
 
 impl Io {
     pub fn new() -> Result<Self> {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(WORKERS)
             .max_blocking_threads(BLOCKING)
+            .thread_keep_alive(LINGER)
             .thread_name("sonora-io")
             .enable_all()
             .build()?;
@@ -154,19 +178,28 @@ pub(crate) fn settled<T>(result: Result<T>, cx: &mut gpui::App) -> std::result::
 pub struct Sonora {
     pub session: Entity<Session>,
     pub cover: Entity<Cover>,
+    pub devices: Entity<Devices>,
     pub drm: Entity<Drm>,
+    pub equalizer: Entity<Equalizer>,
     pub library: Entity<Library>,
     pub history: Entity<History>,
     pub lyrics: Entity<Lyrics>,
     pub network: Entity<Network>,
+    pub outputs: Entity<Outputs>,
     pub pins: Entity<Pins>,
     pub playback: Entity<Playback>,
+    /// The window that mints YouTube's proof-of-origin token. Nothing reads it; it is held so
+    /// that it keeps ticking.
+    pub potoken: Entity<potoken::PoToken>,
     pub queue: Entity<Queue>,
+    pub requirements: Entity<Requirements>,
     pub scan: Entity<Scan>,
     pub scrobbling: Entity<Scrobbling>,
     pub settings: Entity<AppSettings>,
+    pub signal: Entity<Signal>,
     pub updates: Entity<Updates>,
     pub usage: Entity<Usage>,
+    pub wake: Entity<Wake>,
 }
 
 impl Global for Sonora {}
@@ -186,7 +219,12 @@ pub fn init(
     lyrics_providers: Vec<Arc<dyn LyricsProvider>>,
 ) {
     cx.set_global(io.clone());
-    let settings = cx.new(|_| AppSettings::load(database.clone()));
+    let settings = cx.new(|cx| {
+        let mut settings = AppSettings::load(database.clone());
+        settings.watch_files(cx);
+        settings.report_broken(cx);
+        settings
+    });
     let session =
         cx.new(|cx| Session::new(providers, local_provider, settings.clone(), io.clone(), cx));
     let network = cx.new(|_| Network::new(session.clone(), io.clone()));
@@ -198,10 +236,32 @@ pub fn init(
         })
         .detach();
     });
+    // A toast can carry an Undo that acts on the account it was shown for, so none outlives it.
+    cx.subscribe(&session, |_, event, cx| {
+        if let SessionEvent::SignedOut = event {
+            Toasts::clear(cx);
+        }
+    })
+    .detach();
     let cache = storage::Cache::standard();
     let library = cx.new(|cx| Library::new(session.clone(), io.clone(), cache, cx));
     let queue = cx.new(|cx| Queue::new(session.clone(), settings.clone(), cx));
-    let playback = cx.new(|cx| Playback::new(session.clone(), queue.clone(), settings.clone(), cx));
+    // Playback starts no engine until a provider is up, so the saved device is handed over
+    // before any stream opens.
+    let equalizer = cx.new(|cx| Equalizer::new(settings.clone(), cx));
+    let playback = cx.new(|cx| {
+        Playback::new(
+            session.clone(),
+            queue.clone(),
+            settings.clone(),
+            &equalizer,
+            cx,
+        )
+    });
+    let outputs = cx.new(|cx| Outputs::new(settings.clone(), playback.clone(), cx));
+    equalizer.update(cx, |equalizer, cx| {
+        equalizer.follow(&playback, &outputs, cx)
+    });
     let history = cx.new(|cx| {
         History::new(
             session.clone(),
@@ -212,8 +272,15 @@ pub fn init(
         )
     });
     let scan = cx.new(|cx| Scan::new(session.clone(), cx));
-    let scrobbling =
-        cx.new(|cx| Scrobbling::new(playback.clone(), settings.clone(), io.clone(), cx));
+    let scrobbling = cx.new(|cx| {
+        Scrobbling::new(
+            playback.clone(),
+            session.clone(),
+            settings.clone(),
+            io.clone(),
+            cx,
+        )
+    });
     let lyrics = cx.new(|cx| {
         Lyrics::new(
             playback.clone(),
@@ -228,13 +295,37 @@ pub fn init(
     let cover = cx.new(|cx| Cover::new(session.clone(), playback.clone(), io.clone(), cx));
     let drm = cx.new(|cx| Drm::new(session.clone(), io.clone(), cx));
     let updates = cx.new(|cx| Updates::new(settings.clone(), io.clone(), cx));
+    let requirements = cx.new(|cx| {
+        Requirements::new(
+            settings.clone(),
+            session.clone(),
+            outputs.clone(),
+            io.clone(),
+            cx,
+        )
+    });
     let usage = cx.new(|cx| Usage::new(session.clone(), database, io.clone(), cx));
     let pins = cx.new(|cx| Pins::new(settings.clone(), library.clone(), session.clone(), cx));
+    let potoken = potoken::attach(cx);
+    let signal = cx.new(|cx| Signal::new(playback.clone(), outputs.clone(), equalizer.clone(), cx));
+    let wake = cx.new(|cx| Wake::new(settings.clone(), playback.clone(), io.clone(), cx));
+    let devices = cx.new(|cx| {
+        Devices::new(
+            playback.clone(),
+            queue.clone(),
+            library.clone(),
+            settings.clone(),
+            session.clone(),
+            io.clone(),
+            cx,
+        )
+    });
     discord::attach(
         playback.clone(),
         settings.clone(),
         session.clone(),
         cover.clone(),
+        devices.clone(),
         io,
         cx,
     );
@@ -242,18 +333,25 @@ pub fn init(
     cx.set_global(Sonora {
         session,
         cover,
+        devices,
         drm,
+        equalizer,
         library,
         history,
         lyrics,
         network,
+        outputs,
         pins,
         playback,
+        potoken,
         queue,
+        requirements,
         scan,
         scrobbling,
         settings,
+        signal,
         updates,
         usage,
+        wake,
     });
 }

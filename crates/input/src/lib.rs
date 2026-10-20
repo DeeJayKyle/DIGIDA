@@ -36,7 +36,12 @@ actions!(
         ToggleWindowFullscreen,
         Hide,
         HideOthers,
-        ShowAll
+        ShowAll,
+        IncreaseFontSize,
+        DecreaseFontSize,
+        ResetFontSize,
+        Undo,
+        Redo
     ]
 );
 
@@ -113,10 +118,24 @@ fn shared() -> Vec<KeyBinding> {
         KeyBinding::new("enter", Submit, Some(POWERBAR_CONTEXT)),
         KeyBinding::new("ctrl-enter", PowerbarConfirm, Some(POWERBAR_CONTEXT)),
         KeyBinding::new("cmd-enter", PowerbarConfirm, Some(POWERBAR_CONTEXT)),
+        KeyBinding::new("cmd-=", IncreaseFontSize, None),
+        KeyBinding::new("ctrl-=", IncreaseFontSize, None),
+        KeyBinding::new("cmd-+", IncreaseFontSize, None),
+        KeyBinding::new("ctrl-+", IncreaseFontSize, None),
+        KeyBinding::new("cmd--", DecreaseFontSize, None),
+        KeyBinding::new("ctrl--", DecreaseFontSize, None),
+        KeyBinding::new("cmd-0", ResetFontSize, None),
+        KeyBinding::new("ctrl-0", ResetFontSize, None),
         KeyBinding::new("space", TogglePlayback, Some(&away_from_text)),
         KeyBinding::new("ctrl-left", SongPrevious, Some(&away_from_text)),
         KeyBinding::new("ctrl-right", SongNext, Some(&away_from_text)),
         KeyBinding::new("f", ToggleFullscreen, Some(&away_from_text)),
+        KeyBinding::new("f11", ToggleWindowFullscreen, None),
+        KeyBinding::new("cmd-z", Undo, Some(&away_from_text)),
+        KeyBinding::new("ctrl-z", Undo, Some(&away_from_text)),
+        KeyBinding::new("shift-cmd-z", Redo, Some(&away_from_text)),
+        KeyBinding::new("shift-ctrl-z", Redo, Some(&away_from_text)),
+        KeyBinding::new("ctrl-y", Redo, Some(&away_from_text)),
         KeyBinding::new("escape", Dismiss, Some(WORKSPACE_CONTEXT)),
         KeyBinding::new("backspace", Backspace, editing),
         KeyBinding::new("ctrl-backspace", BackspaceWord, editing),

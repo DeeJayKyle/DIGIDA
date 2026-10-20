@@ -1,13 +1,14 @@
 use gpui::prelude::*;
 use gpui::{
     App, Bounds, Context, CursorStyle, Element, ElementInputHandler, Entity, GlobalElementId,
-    InspectorElementId, LayoutId, MouseButton, PaintQuad, Pixels, ShapedLine, Style, TextRun,
-    UnderlineStyle, Window, div, fill, point, px, relative, size, svg,
+    InspectorElementId, LayoutId, MouseButton, PaintQuad, Pixels, Point, ShapedLine, Style,
+    TextRun, UnderlineStyle, Window, div, fill, point, px, relative, size, svg,
 };
 
 use i18n::t;
 
 use crate::button::Button;
+use crate::glass::{blurring, glass};
 use crate::input::{
     CARET, CARET_LINES, Copy, Cut, INPUT_CONTEXT, Input, Paste, SelectAll, clamp_offset,
     clamp_range, masked_text,
@@ -22,6 +23,8 @@ struct Text {
 
 struct Painted {
     line: Option<ShapedLine>,
+    /// Where the line starts, which is the bounds' start unless the text keeps to the end.
+    origin: Point<Pixels>,
     caret: Option<PaintQuad>,
     selection: Option<PaintQuad>,
 }
@@ -152,6 +155,10 @@ impl Element for Text {
         let line = window
             .text_system()
             .shape_line(text, font_size, &runs, None);
+        let left = match input.end {
+            true => bounds.left() + (bounds.size.width - line.width - CARET).max(Pixels::ZERO),
+            false => bounds.left(),
+        };
 
         let (selection, caret) = match selected.is_empty() {
             true => (
@@ -159,7 +166,7 @@ impl Element for Text {
                 Some(fill(
                     Bounds::new(
                         point(
-                            bounds.left() + line.x_for_index(cursor),
+                            left + line.x_for_index(cursor),
                             bounds.top() + (bounds.size.height - font_size * CARET_LINES) / 2.,
                         ),
                         size(CARET, font_size * CARET_LINES),
@@ -170,14 +177,8 @@ impl Element for Text {
             false => (
                 Some(fill(
                     Bounds::from_corners(
-                        point(
-                            bounds.left() + line.x_for_index(selected.start),
-                            bounds.top(),
-                        ),
-                        point(
-                            bounds.left() + line.x_for_index(selected.end),
-                            bounds.bottom(),
-                        ),
+                        point(left + line.x_for_index(selected.start), bounds.top()),
+                        point(left + line.x_for_index(selected.end), bounds.bottom()),
                     ),
                     theme.selection.opacity(0.4),
                 )),
@@ -187,6 +188,7 @@ impl Element for Text {
 
         Painted {
             line: Some(line),
+            origin: point(left, bounds.top()),
             caret,
             selection,
         }
@@ -217,8 +219,9 @@ impl Element for Text {
         let Some(line) = painted.line.take() else {
             return;
         };
+        let origin = painted.origin;
         line.paint(
-            bounds.origin,
+            origin,
             window.line_height(),
             gpui::TextAlign::Left,
             None,
@@ -233,7 +236,7 @@ impl Element for Text {
 
         self.input.update(cx, |input, _| {
             input.last_layout = (!input.content.is_empty()).then_some(line);
-            input.last_bounds = Some(bounds);
+            input.last_bounds = Some(Bounds::from_corners(origin, bounds.bottom_right()));
         });
     }
 }
@@ -251,11 +254,11 @@ impl Render for Input {
         };
 
         let empty = self.selected_range.is_empty();
-        let paste = cx
-            .read_from_clipboard()
-            .and_then(|item| item.text())
-            .is_some();
         let context_menu = self.context_menu.map(|position| {
+            let paste = cx
+                .read_from_clipboard()
+                .and_then(|item| item.text())
+                .is_some();
             Popup::new(
                 position,
                 Menu::new("input-context-menu")
@@ -314,7 +317,14 @@ impl Render for Input {
             .h(height)
             .px_3()
             .rounded(radius)
-            .bg(theme.secondary)
+            // a field tucked into a frosted menu takes the menu's own translucent row fill, since
+            // a flat one would sit on the frost as a solid slab
+            .map(|this| match (self.blurred, self.tucked, blurring(cx)) {
+                (true, _, true) => glass(this, cx),
+                (false, true, true) => this.bg(theme.secondary_hover),
+                _ => this.bg(theme.secondary),
+            })
+            .when(self.blurred, |this| this.shadow_sm())
             .when_else(
                 self.tucked,
                 |this| this.w_full(),
@@ -365,6 +375,15 @@ impl Render for Input {
             .child(Text {
                 input: cx.entity().clone(),
             })
+            .when_some(self.suffix.clone(), |this, key| {
+                this.child(
+                    div()
+                        .flex_none()
+                        .text_size(theme.text(crate::Text::Label))
+                        .text_color(theme.muted_foreground)
+                        .child(i18n::lookup(&key, None)),
+                )
+            })
             .when(self.clearable && !self.content.is_empty(), |this| {
                 this.child(
                     Button::new("input-clear")
@@ -377,6 +396,10 @@ impl Render for Input {
                         .on_click(cx.listener(|this, _, window, cx| this.clear(window, cx))),
                 )
             })
+            .when_some(
+                self.shortcut.clone().filter(|_| self.content.is_empty()),
+                |this, keystroke| this.child(crate::Kbd::new(keystroke)),
+            )
             .when_some(context_menu, |this, menu| this.child(menu))
     }
 }

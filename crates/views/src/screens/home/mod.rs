@@ -10,7 +10,7 @@ use gpui::{
 use i18n::t;
 use music::GenreItem;
 use state::{Home, Network, Playback, SessionState, Sonora};
-use ui::{ActiveTheme as _, Mode, Popup, Scrollbar, Scroller};
+use ui::{ActiveTheme as _, Lazy, Mode, Popup, Scrollbar, Scroller};
 
 use crate::shared::cells;
 use crate::shared::picks::{Picks, Shape};
@@ -58,7 +58,7 @@ impl HomeView {
     ) -> Self {
         let me = cx.entity_id();
         let playlist_scrollbar = cx.new(|_| Scrollbar::inset().watching(me));
-        let menus = ItemMenu::new(playlist_scrollbar);
+        let menus = ItemMenu::new(playlist_scrollbar, cx);
 
         cx.observe(&home, |this, _, cx| {
             this.menus.reset(cx);
@@ -72,7 +72,7 @@ impl HomeView {
         let library = Sonora::global(cx).library.clone();
         cx.observe(&library, |_, _, cx| cx.notify()).detach();
 
-        let shelves = cx.new(|cx| Shelves::new("home-shelf", me, playback.clone(), cx));
+        let shelves = cx.new(|_| Shelves::new("home-shelf", me, playback.clone()));
         cx.observe(&shelves, |_, _, cx| cx.notify()).detach();
 
         let current_playback = playback_status(&playback, cx);
@@ -113,9 +113,12 @@ impl HomeView {
         let shape = Shape::new(width, items.len());
         let pages = shape.pages;
         let page = self.quick_picks.fit(shape.columns, shape.pages);
-        let name = match Sonora::global(cx).session.read(cx).state() {
-            SessionState::SignedIn(profile) => Some(profile.display_name.clone()),
-            _ => None,
+        let name = match self.home.read(cx).is_local(cx) {
+            true => None,
+            false => match Sonora::global(cx).session.read(cx).state() {
+                SessionState::SignedIn(profile) => Some(profile.display_name.clone()),
+                _ => None,
+            },
         };
         let opened = items.clone();
         let home = cx.entity().downgrade();
@@ -188,7 +191,10 @@ impl Render for HomeView {
             }))
         });
 
-        let picks = self.quick_picks(available, cx);
+        let view = cx.entity();
+        let picks = Lazy::new("home-quick-picks", move |_, cx| {
+            view.update(cx, |this, cx| this.quick_picks(available, cx))
+        });
         let sections = self.home.read(cx).sections();
         let feeding = self.home.read(cx).is_feeding();
         let width = self.width;
@@ -200,6 +206,7 @@ impl Render for HomeView {
             });
 
         Scroller::new("home-page", &self.scrollbar)
+            .bottom_inset(crate::chrome::Chrome::bottom(cx))
             .p(theme.metrics.inset)
             .child(
                 div()

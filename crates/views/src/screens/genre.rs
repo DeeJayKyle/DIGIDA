@@ -37,7 +37,7 @@ impl GenreView {
         let settings = Sonora::global(cx).settings.clone();
         let mode = settings.read(cx).view_or(SECTION, Mode::Grid);
         let id = cx.entity_id();
-        let shelves = cx.new(|cx| Shelves::new("genre-shelf", id, playback.clone(), cx));
+        let shelves = cx.new(|_| Shelves::new("genre-shelf", id, playback.clone()));
 
         cx.observe(&detail, |this, _, cx| {
             this.shelves.update(cx, |shelves, _| shelves.reset());
@@ -138,21 +138,24 @@ impl Render for GenreView {
         });
 
         div().flex().flex_col().size_full().child(
-            Scroller::new("genre", &self.scrollbar).p(pad).child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_8()
-                    .child(
-                        div()
-                            .text_size(theme.text(Text::Display))
-                            .font_weight(FontWeight::BOLD)
-                            .child(SharedString::from(title)),
-                    )
-                    .when(loading, |this| this.child(Skeleton::new().w_full().h(TILE)))
-                    .when(empty, |this| this.child(vacant(t!("genre-empty"), cx)))
-                    .child(shelves),
-            ),
+            Scroller::new("genre", &self.scrollbar)
+                .bottom_inset(crate::chrome::Chrome::bottom(cx))
+                .p(pad)
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_8()
+                        .child(
+                            div()
+                                .text_size(theme.text(Text::Display))
+                                .font_weight(FontWeight::BOLD)
+                                .child(SharedString::from(title)),
+                        )
+                        .when(loading, |this| this.child(Skeleton::new().w_full().h(TILE)))
+                        .when(empty, |this| this.child(vacant(t!("genre-empty"), cx)))
+                        .child(shelves),
+                ),
         )
     }
 }

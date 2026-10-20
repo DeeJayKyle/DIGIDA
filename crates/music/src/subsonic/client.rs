@@ -1,29 +1,38 @@
-use std::collections::HashMap;
-use std::time::Duration;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result};
 use async_trait::async_trait;
 use opensubsonic::api::lists::AlbumListType;
 use opensubsonic::data::{AlbumId3, AlbumWithSongsId3, Child, Genre as SourceGenre};
 use opensubsonic::{Auth, Client};
-use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
+use tokio::sync::OnceCell;
 use tokio::task::JoinSet;
 
+use crate::engine::Loudness;
+use crate::escape;
 use crate::subsonic::auth::Signature;
 use crate::subsonic::wire;
 use crate::{
-    Album, AlbumDetail, Artist, ArtistProfile, Genre, GenreDetail, GenreItem, GenreSection,
-    HomeFeed, MediaKind, MusicApi, Playlist, PlaylistDetail, SavedArtist, Track, UserProfile,
-    distinct_covers,
+    Album, AlbumCatalogue, AlbumDetail, Artist, ArtistProfile, Codec, Genre, GenreDetail,
+    GenreItem, GenreSection, HomeFeed, MediaKind, MusicApi, Playlist, PlaylistDetail, Report,
+    SUGGESTIONS, SavedArtist, Track, Transcode, UserProfile, distinct_covers, iso_8601_to_epoch,
 };
 
 const PORTRAIT_LIMIT: usize = 24;
 const RADIO_COUNT: i32 = 25;
+/// How many similar artists lend their albums to a thin rail, and how many albums each
+/// lends.
+const SIMILAR_ARTISTS: usize = 6;
+const SIMILAR_RELEASES: usize = 2;
 const HOME_SONGS: i32 = 25;
 const HOME_ALBUMS: i32 = 12;
 const LIBRARY_PAGE: i32 = 500;
 const API_VERSION: &str = "1.16.1";
 const CLIENT_NAME: &str = "sonora";
+/// The OpenSubsonic extension that takes a playback position and state.
+const PLAYBACK_REPORT: &str = "playbackReport";
 
 #[derive(Clone)]
 pub struct SubsonicClient {
@@ -34,6 +43,17 @@ pub struct SubsonicClient {
     /// every url afresh, which would give one cover a new url on every conversion and defeat
     /// every image cache between here and the screen.
     covers: String,
+    /// Whether the server takes `reportPlayback`, asked the first time a report goes out.
+    playback_report: Arc<OnceCell<bool>>,
+}
+
+/// What the server records about a track that playback wants before the decoder can tell.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Details {
+    pub duration: Option<Duration>,
+    /// The track's ReplayGain, which OpenSubsonic servers such as Navidrome report and plain
+    /// Subsonic servers do not.
+    pub loudness: Option<Loudness>,
 }
 
 impl SubsonicClient {
@@ -49,23 +69,43 @@ impl SubsonicClient {
             .with_client_name(CLIENT_NAME);
         let covers = format!(
             "{server}/rest/getCoverArt?u={}&t={}&s={}&v={API_VERSION}&c={CLIENT_NAME}&f=json",
-            utf8_percent_encode(&username, NON_ALPHANUMERIC),
-            utf8_percent_encode(&signature.token, NON_ALPHANUMERIC),
-            utf8_percent_encode(&signature.salt, NON_ALPHANUMERIC),
+            escape::component(&username),
+            escape::component(&signature.token),
+            escape::component(&signature.salt),
         );
         Ok(Self {
             client,
             username,
             http: reqwest::Client::new(),
             covers,
+            playback_report: Arc::default(),
         })
+    }
+
+    /// Whether the server lists the `playbackReport` extension, asked once per client. A plain
+    /// Subsonic server has no extension list and answers with an error, which counts as no.
+    async fn reports_playback(&self) -> bool {
+        *self
+            .playback_report
+            .get_or_init(|| async {
+                match self.client.get_open_subsonic_extensions().await {
+                    Ok(extensions) => extensions
+                        .iter()
+                        .any(|extension| extension.name == PLAYBACK_REPORT),
+                    Err(error) => {
+                        log::info!("subsonic: the server lists no extensions: {error:#}");
+                        false
+                    }
+                }
+            })
+            .await
     }
 
     fn cover_url(&self, id: &str, size: i32) -> Option<String> {
         Some(format!(
             "{}&id={}&size={size}",
             self.covers,
-            utf8_percent_encode(id, NON_ALPHANUMERIC)
+            escape::component(id)
         ))
     }
 
@@ -106,7 +146,10 @@ impl SubsonicClient {
             artist_refs,
             cover,
             cover_large: large,
-            release_type: crate::ReleaseType::Album,
+            release_type: wire::release_type(
+                detail.release_types.as_deref(),
+                detail.is_compilation,
+            ),
             year,
             track_count: detail
                 .song_count
@@ -116,9 +159,9 @@ impl SubsonicClient {
                 0 => String::new(),
                 _ => year.to_string(),
             },
-            label: String::new(),
+            label: wire::labels(detail.record_labels.as_deref()),
             copyrights: Vec::new(),
-            added_at: None,
+            added_at: iso_8601_to_epoch(detail.created.as_deref()),
         }
     }
 
@@ -148,6 +191,84 @@ impl SubsonicClient {
             return Some(url.to_owned());
         }
         self.cover_large(art, fallback)
+    }
+
+    /// Up to `SUGGESTIONS` of the artist's own albums without the album the page is already
+    /// showing.
+    async fn more_from_artist(&self, album_id: &str, artist_id: &str) -> Result<Vec<Album>> {
+        let detail = self
+            .client
+            .get_artist(artist_id)
+            .await
+            .with_context(|| format!("cannot load more from artist {artist_id}"))?;
+        Ok(detail
+            .album
+            .into_iter()
+            .map(|album| self.convert_album(album))
+            .filter(|album| album.id != album_id)
+            .take(SUGGESTIONS)
+            .collect())
+    }
+
+    /// Up to `SUGGESTIONS` artists the server lists as similar, for the rail's artists tab.
+    async fn similar_artists(&self, artist_id: &str) -> Result<Vec<SavedArtist>> {
+        let info = self
+            .client
+            .get_artist_info2(artist_id, Some(SUGGESTIONS as i32), None)
+            .await
+            .with_context(|| format!("cannot load artists similar to {artist_id}"))?;
+        Ok(info
+            .similar_artist
+            .into_iter()
+            .filter(|artist| !artist.name.is_empty())
+            .map(|artist| SavedArtist {
+                cover: self.artist_cover(
+                    artist.cover_art.as_deref(),
+                    artist.artist_image_url.as_deref(),
+                    &artist.id,
+                ),
+                id: artist.id.clone(),
+                name: artist.name.clone(),
+                added_at: None,
+            })
+            .take(SUGGESTIONS)
+            .collect())
+    }
+
+    /// A few albums each from the first similar artists, skipping the page's own album:
+    /// the cross-artist half of the rail. One artist failing only shortens the rail.
+    async fn similar_releases(&self, album_id: &str, similar: &[SavedArtist]) -> Vec<Album> {
+        let mut tasks = JoinSet::new();
+        for artist in similar.iter().take(SIMILAR_ARTISTS) {
+            let client = self.clone();
+            let album_id = album_id.to_owned();
+            let artist_id = artist.id.clone();
+            tasks.spawn(async move {
+                let detail = match client.client.get_artist(&artist_id).await {
+                    Ok(detail) => detail,
+                    Err(error) => {
+                        log::warn!("subsonic: cannot load similar artist {artist_id}: {error:#}");
+                        return None;
+                    }
+                };
+                Some(
+                    detail
+                        .album
+                        .into_iter()
+                        .map(|album| client.convert_album(album))
+                        .filter(|album| album.id != album_id)
+                        .take(SIMILAR_RELEASES)
+                        .collect::<Vec<Album>>(),
+                )
+            });
+        }
+        let mut releases = Vec::new();
+        while let Some(read) = tasks.join_next().await {
+            if let Ok(Some(read)) = read {
+                releases.extend(read);
+            }
+        }
+        releases
     }
 }
 
@@ -314,6 +435,48 @@ impl MusicApi for SubsonicClient {
         Ok(song
             .and_then(|song| song.play_count)
             .map(|count| count as u64))
+    }
+
+    /// Sends the position and state through `reportPlayback`, with scrobbling left to `played`.
+    /// A server without the extension only hears that the track is playing, through the
+    /// now-playing form of `scrobble`, since it has nowhere to put a position.
+    async fn report(&self, track_id: &str, report: Report, position: Duration) -> Result<()> {
+        if !self.reports_playback().await {
+            return match report {
+                Report::Playing => self
+                    .client
+                    .scrobble(track_id, None, Some(false))
+                    .await
+                    .with_context(|| format!("cannot report {track_id} as playing")),
+                Report::Paused | Report::Stopped => Ok(()),
+            };
+        }
+        let state = match report {
+            Report::Playing => "playing",
+            Report::Paused => "paused",
+            Report::Stopped => "stopped",
+        };
+        let millis = i64::try_from(position.as_millis()).unwrap_or(i64::MAX);
+        self.client
+            .report_playback(track_id, "song", millis, state, None, Some(true))
+            .await
+            .with_context(|| format!("cannot report {track_id} as {state}"))
+    }
+
+    /// Subsonic takes the start of the listen in milliseconds since the epoch.
+    async fn played(&self, track_id: &str, at: SystemTime) -> Result<()> {
+        let millis = at
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        self.client
+            .scrobble(
+                track_id,
+                Some(i64::try_from(millis).unwrap_or(i64::MAX)),
+                Some(true),
+            )
+            .await
+            .with_context(|| format!("cannot record a play of {track_id}"))
     }
 
     async fn playlists(&self) -> Result<Vec<Playlist>> {
@@ -505,6 +668,52 @@ impl MusicApi for SubsonicClient {
 
     async fn album_tracks(&self, album_id: &str) -> Result<Vec<Track>> {
         Ok(self.album(album_id).await?.tracks)
+    }
+
+    async fn album_catalogue(
+        &self,
+        album_id: &str,
+        artist_id: Option<&str>,
+    ) -> Result<AlbumCatalogue> {
+        let Some(artist_id) = artist_id else {
+            return Ok(AlbumCatalogue::default());
+        };
+        let (more_by, similar) = tokio::join!(
+            self.more_from_artist(album_id, artist_id),
+            self.similar_artists(artist_id),
+        );
+        // Nothing read at all is an error rather than an empty rail, so the catalog does not
+        // keep the empty answer for the rest of the session.
+        let (more_by, similar) = match (more_by, similar) {
+            (Err(error), Err(_)) => return Err(error.context("cannot read any recommendations")),
+            pair => pair,
+        };
+        if let Err(error) = &more_by {
+            log::warn!("subsonic: cannot read more from this artist: {error:#}");
+        }
+        if let Err(error) = &similar {
+            log::warn!("subsonic: cannot read similar artists: {error:#}");
+        }
+        let (more_by, similar) = (more_by.unwrap_or_default(), similar.unwrap_or_default());
+        let mut seen = HashSet::new();
+        let mut liked: Vec<Album> = more_by
+            .into_iter()
+            .filter(|album| seen.insert(album.id.clone()))
+            .collect();
+        if liked.len() < SUGGESTIONS && !similar.is_empty() {
+            for album in self.similar_releases(album_id, &similar).await {
+                if liked.len() >= SUGGESTIONS {
+                    break;
+                }
+                if seen.insert(album.id.clone()) {
+                    liked.push(album);
+                }
+            }
+        }
+        Ok(AlbumCatalogue {
+            also_like: liked,
+            similar,
+        })
     }
 
     async fn playlist(&self, playlist_id: &str) -> Result<PlaylistDetail> {
@@ -729,12 +938,18 @@ impl SubsonicClient {
             .unwrap_or_default()
     }
 
-    /// Opens the audio of a track and answers once the response headers are in; the body is
-    /// still on its way.
-    pub async fn open_stream(&self, track_id: &str) -> Result<reqwest::Response> {
+    /// Opens the audio of a track, converted as `transcode` asks, and answers once the response
+    /// headers are in. The body is still on its way.
+    pub async fn open_stream(
+        &self,
+        track_id: &str,
+        transcode: Transcode,
+    ) -> Result<reqwest::Response> {
+        let bitrate = transcode.bitrate.and_then(|kbps| i32::try_from(kbps).ok());
+        let format = transcode.codec.map(Codec::id);
         let url = self
             .client
-            .stream_url(track_id, None, None)
+            .stream_url(track_id, bitrate, format)
             .context("cannot build the stream url")?;
         self.http
             .get(url)
@@ -745,11 +960,51 @@ impl SubsonicClient {
             .context("the server refused the stream")
     }
 
-    /// The length the server records for a track, when it has one.
-    pub async fn duration(&self, track_id: &str) -> Option<Duration> {
-        let song = self.client.get_song(track_id).await.ok()?;
-        let seconds = song.duration?;
-        Some(Duration::from_secs(u64::try_from(seconds).unwrap_or(0)))
+    /// The lyrics the server holds for a track, by the OpenSubsonic `songLyrics` extension. A
+    /// plain Subsonic server fails the call.
+    pub(crate) async fn lyrics_by_song(
+        &self,
+        track_id: &str,
+    ) -> Result<opensubsonic::data::LyricsList> {
+        self.client
+            .get_lyrics_by_song_id(track_id, None)
+            .await
+            .context("cannot fetch the structured lyrics")
+    }
+
+    /// The plain lyrics a Subsonic server finds for an artist and title, the only form a server
+    /// without the `songLyrics` extension offers.
+    pub(crate) async fn lyrics_by_name(
+        &self,
+        artist: &str,
+        title: &str,
+    ) -> Result<opensubsonic::data::Lyrics> {
+        self.client
+            .get_lyrics(Some(artist), Some(title))
+            .await
+            .context("cannot fetch the lyrics")
+    }
+
+    /// The length and ReplayGain the server records for a track, whichever it has. The track
+    /// gain wins, and the album gain stands in when that is all the server knows.
+    pub async fn details(&self, track_id: &str) -> Details {
+        let Ok(song) = self.client.get_song(track_id).await else {
+            return Details::default();
+        };
+        let duration = song
+            .duration
+            .map(|seconds| Duration::from_secs(u64::try_from(seconds).unwrap_or(0)));
+        let loudness = song.replay_gain.and_then(|gain| {
+            let (gain, peak) = match gain.track_gain {
+                Some(track) => (track, gain.track_peak),
+                None => (gain.album_gain?, gain.album_peak),
+            };
+            Some(Loudness::replay_gain(
+                gain as f32,
+                peak.map(|peak| peak as f32),
+            ))
+        });
+        Details { duration, loudness }
     }
 }
 

@@ -1,16 +1,17 @@
 use std::cell::RefCell;
 use std::cmp::Ordering;
+use std::io::Write as _;
 use ui::{ActiveTheme as _, Filter, FilterChange, FlagAxis, RangeAxis, Unit};
 
 use gpui::{AnyElement, App, Entity, SharedString, TextAlign};
 use i18n::t;
-use music::{Album, Shape};
+use music::Album;
 use state::{Library, LibraryPart, Origin, Playback, Shelf};
 use ui::rank::{HANDY, NICE, SPARE, USEFUL};
 use ui::{Cell, ColumnSpec, Menu, Pin, TableSource, Width};
 
 use crate::shared::cells::{self, DATE, NUMBER, TRAILING, YEAR};
-use crate::shared::menus::album_menu;
+use crate::shared::menus::{ItemMenu, album_menu};
 use crate::shared::pins::Pinned as _;
 use crate::shared::text::{folded, holds};
 use crate::shared::tracks::initial;
@@ -91,6 +92,8 @@ pub(super) const COLUMNS: &[ColumnSpec<AlbumField>] = &[
 pub(super) struct AlbumSource {
     library: Entity<Library>,
     playback: Entity<Playback>,
+    /// The state of the row menu's Add to playlist submenu.
+    menu: ItemMenu,
     shelf: Shelf,
     year_span: Option<(f32, f32)>,
     starred: bool,
@@ -98,7 +101,7 @@ pub(super) struct AlbumSource {
 }
 
 struct Spread {
-    stamp: (usize, String),
+    stamp: usize,
     years: Vec<f32>,
 }
 
@@ -106,11 +109,13 @@ impl AlbumSource {
     pub(super) fn shelved(
         library: Entity<Library>,
         playback: Entity<Playback>,
+        menu: ItemMenu,
         shelf: Shelf,
     ) -> Self {
         Self {
             library,
             playback,
+            menu,
             shelf,
             year_span: None,
             starred: false,
@@ -120,21 +125,24 @@ impl AlbumSource {
 
     fn index_cell(&self, cell: &Cell<AlbumField>, album: &Album, cx: &App) -> AnyElement {
         let origin = Origin::album(album.id.clone()).named(album.name.clone());
-        let state = self.playback.read(cx).playing_from(&origin);
+        let playing = self.playback.read(cx).playing_from(&origin, cx);
         let played = origin.clone();
-        let press = cells::toggle(&self.playback, state.clone(), move |playback, cx| {
+        let press = cells::toggle(&self.playback, playing, move |playback, cx| {
             playback.play_origin(played.clone(), cx)
         });
 
-        cells::index(cell, state, true, None, None, press, cx)
+        cells::index(cell, playing, true, None, None, press, cx)
     }
 
     pub(super) fn at(&self, row: usize, cx: &App) -> Option<Album> {
         self.albums(cx).get(row).cloned()
     }
 
-    pub(super) fn years(&self, query: &str, cx: &App) -> Vec<f32> {
-        let stamp = (self.albums(cx).len(), query.to_owned());
+    /// Every year the shelf holds, in order and without repeats. The stops deliberately ignore
+    /// the search and the other filters, so narrowing the grid to nothing still leaves the
+    /// slider standing at its full span.
+    pub(super) fn years(&self, cx: &App) -> Vec<f32> {
+        let stamp = self.albums(cx).len();
         if let Some(spread) = self.spread.borrow().as_ref()
             && spread.stamp == stamp
         {
@@ -144,7 +152,7 @@ impl AlbumSource {
         let mut years: Vec<f32> = self
             .albums(cx)
             .iter()
-            .filter(|album| album.year > 0 && hits(album, query))
+            .filter(|album| album.year > 0)
             .map(|album| album.year as f32)
             .collect();
         years.sort_by(f32::total_cmp);
@@ -163,7 +171,7 @@ impl AlbumSource {
 
     /// Whether the shelf lists more than the favorites, so a favorites filter has something to do.
     fn catalog(&self, cx: &App) -> bool {
-        self.library.read(cx).shape(self.shelf) == Shape::Catalog
+        self.library.read(cx).shape(self.shelf).is_catalog()
     }
 }
 
@@ -179,7 +187,7 @@ impl TableSource for AlbumSource {
     }
 
     fn matches(&self, row: usize, query: &str, cx: &App) -> bool {
-        self.at(row, cx).is_some_and(|album| {
+        self.albums(cx).get(row).is_some_and(|album| {
             if self.starred && !self.library.read(cx).saved_album(&album.id) {
                 return false;
             }
@@ -189,13 +197,13 @@ impl TableSource for AlbumSource {
                     return false;
                 }
             }
-            hits(&album, query)
+            hits(album, query)
         })
     }
 
-    fn filter_axes(&self, query: &str, cx: &App) -> Vec<Filter> {
+    fn filter_axes(&self, cx: &App) -> Vec<Filter> {
         let mut axes = Vec::new();
-        let years = self.years(query, cx);
+        let years = self.years(cx);
         if let (Some(first), Some(last)) = (years.first(), years.last()) {
             let bounds = (*first, *last);
             let value = self.year_span.unwrap_or(bounds);
@@ -247,7 +255,7 @@ impl TableSource for AlbumSource {
     fn playing(&self, row: usize, cx: &App) -> bool {
         self.albums(cx).get(row).is_some_and(|album| {
             let origin = Origin::album(album.id.clone());
-            self.playback.read(cx).playing_from(&origin).is_some()
+            self.playback.read(cx).playing_from(&origin, cx).is_some()
         })
     }
 
@@ -269,9 +277,13 @@ impl TableSource for AlbumSource {
         Some(album_menu(
             self.at(*rows.first()?, cx)?,
             self.playback.clone(),
-            false,
+            &self.menu,
             cx,
         ))
+    }
+
+    fn context_menu_will_open(&self, _rows: &[usize], cx: &App) {
+        self.menu.reset(cx);
     }
 
     fn cell(&self, cell: Cell<AlbumField>, cx: &mut App) -> AnyElement {
@@ -349,7 +361,22 @@ fn hits(album: &Album, query: &str) -> bool {
     if query.is_empty() {
         return true;
     }
-    holds(&album.name, query) || holds(&album.artists, query) || holds(&year(album), query)
+    holds(&album.name, query) || holds(&album.artists, query) || year_holds(album, query)
+}
+
+/// Whether the album's year, as `year` prints it, holds the query. The digits are written on the
+/// stack, since a filter asks this of every album on every keystroke.
+fn year_holds(album: &Album, query: &str) -> bool {
+    if album.year <= 0 {
+        return query.is_empty();
+    }
+    let mut digits = [0u8; 12];
+    let mut cursor = std::io::Cursor::new(&mut digits[..]);
+    if write!(cursor, "{}", album.year).is_err() {
+        return false;
+    }
+    let written = cursor.position() as usize;
+    std::str::from_utf8(&digits[..written]).is_ok_and(|text| holds(text, query))
 }
 
 fn year(album: &Album) -> String {

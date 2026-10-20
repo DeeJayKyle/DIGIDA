@@ -9,16 +9,17 @@ use std::time::Duration;
 use anyhow::Result;
 use async_trait::async_trait;
 
-use crate::engine::{self, Fetch};
+use crate::aac::Aac;
+use crate::engine::{self, Fetch, Loudness};
 use crate::stream::{Plain, Reader, Stream};
-use crate::subsonic::client::SubsonicClient;
-use crate::{PlaybackConfig, PlaybackEvents, PlaybackFactory, Player};
+use crate::subsonic::client::{Details, SubsonicClient};
+use crate::{PlaybackConfig, PlaybackEvents, PlaybackFactory, Player, Transcode};
 
-/// A track downloading, and how long the server says it is.
+/// A track downloading, and what the server says about its length and loudness.
 #[derive(Clone)]
 pub struct Loaded {
     stream: Stream,
-    duration: Option<Duration>,
+    details: Details,
 }
 
 pub struct Factory {
@@ -36,6 +37,7 @@ impl PlaybackFactory for Factory {
         engine::start(
             Subsonic {
                 client: self.client.clone(),
+                transcode: config.transcode,
             },
             config,
         )
@@ -44,6 +46,7 @@ impl PlaybackFactory for Factory {
 
 struct Subsonic {
     client: SubsonicClient,
+    transcode: Transcode,
 }
 
 #[async_trait]
@@ -55,30 +58,47 @@ impl Fetch for Subsonic {
         "subsonic"
     }
 
-    /// Opens the stream and asks for the length at the same time, so neither round trip waits
-    /// on the other; the preroll usually covers the length lookup entirely.
+    /// Opens the stream and asks for the length and loudness at the same time, so neither round
+    /// trip waits on the other. The preroll usually covers the lookup entirely.
     async fn load(&self, id: &str) -> Result<Loaded> {
-        let (stream, duration) = tokio::join!(
-            async { Stream::open(self.client.open_stream(id).await?, Plain).await },
-            self.client.duration(id),
+        let (stream, details) = tokio::join!(
+            async {
+                let response = self.client.open_stream(id, self.transcode).await?;
+                Stream::open(response, Plain).await
+            },
+            self.client.details(id),
         );
         Ok(Loaded {
             stream: stream?,
-            duration,
+            details,
         })
     }
 
     fn length(&self, loaded: &Loaded) -> Option<Duration> {
-        loaded.duration
+        loaded.details.duration
+    }
+
+    fn loudness(&self, loaded: &Loaded) -> Option<Loudness> {
+        loaded.details.loudness
+    }
+
+    async fn downloaded(&self, loaded: &Loaded) {
+        loaded.stream.finished().await;
     }
 
     /// Builds a decoder over a stream and places it at `at`. The bytes past the preroll are
     /// still arriving, so this only reads the header.
+    ///
+    /// A converted track has no length until all of it has arrived, and Symphonia's Ogg reader
+    /// panics when it seeks a seekable source of unknown length. Until then the decoder only
+    /// reads forward, which reaches any position from the start.
     fn open(&self, id: &str, loaded: &Loaded, at: Duration) -> Option<Self::Source> {
+        let total = loaded.stream.total();
         let mut builder = rodio::Decoder::builder()
+            .with_symphonia_decoder::<Aac>()
             .with_data(loaded.stream.reader())
-            .with_seekable(true);
-        if let Some(total) = loaded.stream.total() {
+            .with_seekable(total.is_some());
+        if let Some(total) = total {
             builder = builder.with_byte_len(total);
         }
         let mut decoder = match builder.build() {
@@ -97,5 +117,11 @@ impl Fetch for Subsonic {
             );
         }
         Some(decoder)
+    }
+
+    /// A decoder opened before a converted track finished arriving can only read forward, so
+    /// every seek starts a fresh one that knows the length if the download has ended by then.
+    fn reopen_to_seek(&self) -> bool {
+        true
     }
 }

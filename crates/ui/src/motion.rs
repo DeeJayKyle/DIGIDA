@@ -123,11 +123,9 @@ impl Saver {
     }
 
     pub fn label(self) -> SharedString {
-        match (self, self.rate()) {
-            (Self::Light, Some(fps)) => t!("saver-light", fps = fps),
-            (Self::Medium, Some(fps)) => t!("saver-medium", fps = fps),
-            (Self::Strong, Some(fps)) => t!("saver-strong", fps = fps),
-            _ => t!("saver-off"),
+        match self.rate() {
+            Some(fps) => t!("saver-fps", fps = fps),
+            None => t!("saver-off"),
         }
     }
 
@@ -155,8 +153,48 @@ impl Saver {
     }
 }
 
+/// Stretches or shortens `span` by the chosen pace, for motion that sets its own length.
+pub fn paced(span: Duration) -> Duration {
+    span.mul_f32(pace().scale())
+}
+
 pub fn entrance_span() -> Duration {
     Motion::Base.span() + ENTRANCE_EXTRA
+}
+
+/// One run of the entrance a screen makes as it appears. The renderer reads how much of the
+/// screen is still hidden on every frame and asks for another frame while it runs.
+#[derive(Clone, Copy, Debug)]
+pub struct Entrance {
+    started: Instant,
+    span: Duration,
+}
+
+impl Entrance {
+    pub fn start() -> Self {
+        Self {
+            started: Instant::now(),
+            span: entrance_span(),
+        }
+    }
+
+    pub fn span(self) -> Duration {
+        self.span
+    }
+
+    /// How much of the screen is still hidden, from 1 as the entrance starts to 0 once it ends.
+    pub fn hidden(self) -> f32 {
+        if self.span.is_zero() {
+            return 0.;
+        }
+        let elapsed = self.started.elapsed().as_secs_f32();
+        let progress = (elapsed / self.span.as_secs_f32()).clamp(0., 1.);
+        1. - ease_out_expo(progress)
+    }
+
+    pub fn running(self) -> bool {
+        self.started.elapsed() < self.span
+    }
 }
 
 fn entrance() -> Animation {
@@ -179,6 +217,22 @@ pub fn veiled<E: Styled>(element: E, hidden: f32) -> E {
 /// frame the cache was filled on.
 pub fn entering<E: Styled>(element: E, hidden: f32) -> E {
     veiled(element, hidden).opacity(1. - hidden.clamp(0., 1.))
+}
+
+/// The entrance's fade with none of its filter, for the one thing that cannot ride the
+/// entrance itself. `veiled` and `entering` are paint filters, and the renderer drops a
+/// backdrop inside a filtered layer, so a surface that frosts what it covers fades its blur in
+/// as a sibling underneath the rising panel rather than rising with it.
+pub trait Fading: Sized {
+    fn fading(self, id: impl Into<ElementId>) -> AnimationElement<Self>;
+}
+
+impl<E: Styled + IntoElement + 'static> Fading for E {
+    fn fading(self, id: impl Into<ElementId>) -> AnimationElement<Self> {
+        self.with_animation(id, entrance(), |element, delta| {
+            element.opacity(delta.clamp(0., 1.))
+        })
+    }
 }
 
 pub trait Rising: Sized {
@@ -205,6 +259,17 @@ pub fn mix(from: Hsla, to: Hsla, t: f32) -> Hsla {
         a: blend(from.a, to.a),
     }
     .into()
+}
+
+/// The CSS `ease` timing function, cubic-bezier(0.25, 0.1, 0.25, 1), for motion copied from
+/// the web.
+pub fn css_ease(progress: f32) -> f32 {
+    cubic_bezier(progress.clamp(0., 1.), 0.25, 0.1, 0.25, 1.)
+}
+
+/// The CSS `ease-out` timing function, cubic-bezier(0, 0, 0.58, 1).
+pub fn css_ease_out(progress: f32) -> f32 {
+    cubic_bezier(progress.clamp(0., 1.), 0., 0., 0.58, 1.)
 }
 
 pub fn ease_out_expo(progress: f32) -> f32 {
@@ -345,6 +410,71 @@ pub fn apply(stillness: Stillness, pace: Pace, cx: &mut App) {
 
 pub fn animates(cx: &App) -> bool {
     !cx.reduce_motion()
+}
+
+/// How lit an element is under the pointer, eased in over `span` as the pointer arrives and out
+/// as it leaves. A change halfway turns back from where the fade stands, so nothing jumps. Keep
+/// one per element in `window.use_keyed_state`, tell it from `on_hover`, and read `level` while
+/// drawing.
+pub struct HoverFade {
+    hovered: bool,
+    /// Where the fade stood, unbent by easing, when the pointer last came or went.
+    from: f32,
+    since: Option<Instant>,
+    span: Duration,
+}
+
+impl HoverFade {
+    pub fn new(span: Duration) -> Self {
+        Self {
+            hovered: false,
+            from: 0.,
+            since: None,
+            span,
+        }
+    }
+
+    /// Turns the fade towards `hovered`, starting from wherever it stands now.
+    pub fn set(&mut self, hovered: bool) {
+        if hovered == self.hovered {
+            return;
+        }
+        self.from = self.linear();
+        self.hovered = hovered;
+        self.since = Some(Instant::now());
+    }
+
+    /// How lit the element is, from 0 at rest to 1 hovered, eased. It asks for the next frame
+    /// while the fade runs and lands at once under reduced motion.
+    pub fn level(&mut self, window: &mut gpui::Window, cx: &App) -> f32 {
+        let target = f32::from(u8::from(self.hovered));
+        if cx.reduce_motion() {
+            self.since = None;
+            self.from = target;
+        }
+        let at = self.linear();
+        if at == target {
+            self.since = None;
+            self.from = target;
+        } else {
+            window.request_animation_frame();
+        }
+        css_ease(at)
+    }
+
+    /// Where the fade stands before easing, moving from `from` towards the target at one span
+    /// for the whole way.
+    fn linear(&self) -> f32 {
+        let target = f32::from(u8::from(self.hovered));
+        let Some(since) = self.since else {
+            return self.from;
+        };
+        let travelled = since.elapsed().as_secs_f32() / self.span.as_secs_f32().max(f32::EPSILON);
+        match self.hovered {
+            true => (self.from + travelled).min(target),
+            false => (self.from - travelled).max(target),
+        }
+    }
 }
 
 pub(crate) struct Movement {

@@ -1,19 +1,18 @@
 use std::num::NonZero;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
 
-use anyhow::{Context as _, Result};
-use cpal::traits::{DeviceTrait, HostTrait};
 use rodio::source::SeekError;
-use rodio::{DeviceSinkBuilder, MixerDeviceSink, Source};
+use rodio::{ChannelCount, SampleRate, Source};
 
-use crate::equalizer::{Equalized, Equalizer};
-use crate::spectrum::{Spectrum, Tap};
+use crate::equalizer::{Equalizer, FilterStage};
+use crate::spectrum::{Analyzer, Probe, Spectrum, Tap};
 
 pub const RAMP: Duration = Duration::from_millis(25);
-const BUFFER: Duration = Duration::from_millis(50);
-
+/// The loudest sample an integer device takes: the largest `f32` below one, since one itself
+/// overflows a 24-bit sample and wraps to the far end of the scale.
+const FULL_SCALE: f32 = 1. - f32::EPSILON / 2.;
 #[derive(Clone)]
 pub struct Volume(Arc<AtomicU32>);
 
@@ -31,173 +30,204 @@ impl Volume {
     }
 }
 
-/// What sits between the queue and the device: the equalizer, then the volume ramp, with the
-/// spectrum tap listening at the end. Every engine builds one and hands it to the output.
+/// The loudest sample any output sent its device since the meter was last read, after the
+/// volume and before the clamp an integer device gets, so an over shows however the device
+/// takes it. Every output shares one.
+#[derive(Clone, Debug, Default)]
+pub struct Meter(Arc<AtomicU32>);
+
+impl Meter {
+    /// The loudest absolute sample since the last call, as a linear amplitude, and a fresh
+    /// start for the next one.
+    pub fn take(&self) -> f32 {
+        f32::from_bits(self.0.swap(0, Ordering::Relaxed))
+    }
+
+    /// Keeps `sample` if it is the loudest yet. A finite non-negative `f32` orders like its
+    /// bits, so the maximum is kept on the bits; NaN would sort above infinity and is left out.
+    fn record(&self, sample: f32) {
+        let bits = sample.abs().to_bits();
+        // A plain load first, since a new loudest sample is rare once the meter has warmed up.
+        if sample.is_finite() && bits > self.0.load(Ordering::Relaxed) {
+            self.0.fetch_max(bits, Ordering::Relaxed);
+        }
+    }
+}
+
+/// The rate and channel count of what one player is playing, published by each chunk as it
+/// yields its first sample. The queue's own answer depends on how the previous chunk ended, so
+/// the chain follows this instead. Zero means no chunk has played yet.
+#[derive(Clone, Default)]
+pub(crate) struct PublishedFormat(Arc<AtomicU64>);
+
+impl PublishedFormat {
+    pub(crate) fn publish(&self, rate: SampleRate, channels: ChannelCount) {
+        let word = u64::from(rate.get()) << 16 | u64::from(channels.get());
+        self.0.store(word, Ordering::Relaxed);
+    }
+}
+
+/// Which channel of its frame each sample a chain stage pulls belongs to, counted from the
+/// format the playing chunk published. A change of format starts a new frame.
+pub(crate) struct Frames {
+    format: PublishedFormat,
+    /// The word last read, so a change is noticed on the sample that brings it.
+    seen: u64,
+    channel: u16,
+}
+
+/// Where the sample just pulled sits in its frame.
+pub(crate) struct Place {
+    pub channel: u16,
+    /// Whether this sample brought a new format, which the stage takes up before using it.
+    pub changed: bool,
+}
+
+impl Frames {
+    pub(crate) fn new(format: PublishedFormat) -> Self {
+        Self {
+            format,
+            seen: 0,
+            channel: 0,
+        }
+    }
+
+    /// Pulls the next sample from `input` and places it in its frame. The place is `None` until a
+    /// chunk has published a format, and the stage passes those samples through untouched.
+    pub(crate) fn pull(
+        &mut self,
+        input: &mut impl Iterator<Item = f32>,
+    ) -> Option<(f32, Option<Place>)> {
+        let sample = input.next()?;
+        // The chunk publishes during the pull, so the word is read after it.
+        let word = self.format.0.load(Ordering::Relaxed);
+        let changed = word != self.seen;
+        if changed {
+            self.seen = word;
+            self.channel = 0;
+        }
+        let channels = self.channels();
+        if channels == 0 {
+            return Some((sample, None));
+        }
+
+        let channel = self.channel;
+        self.channel += 1;
+        if self.channel >= channels {
+            self.channel = 0;
+        }
+        Some((sample, Some(Place { channel, changed })))
+    }
+
+    pub(crate) fn rate(&self) -> u32 {
+        (self.seen >> 16) as u32
+    }
+
+    pub(crate) fn channels(&self) -> u16 {
+        self.seen as u16
+    }
+}
+
+/// What sits between the queue and the device: the analyzer listening ahead of the equalizer,
+/// then the equalizer and the volume ramp, with the spectrum tap and the meter listening at the
+/// end. Every engine builds one and hands it to the output.
 pub struct Chain {
     pub volume: Volume,
+    /// Hears the music ahead of the equalizer for the equalizer screen, shared like `meter`.
+    pub analyzer: Analyzer,
     pub equalizer: Equalizer,
     pub spectrum: Spectrum,
+    pub meter: Meter,
 }
 
-pub struct Output {
-    sink: Arc<rodio::Player>,
-    volume: Volume,
-    device: String,
-    failed: Arc<AtomicBool>,
-    _stream: MixerDeviceSink,
-}
-
-impl Output {
-    /// Claims the default output device and runs every sample through the equalizer and then
-    /// the volume ramp before it reaches the mixer.
-    pub fn open(chain: Chain) -> Result<Self> {
-        let Chain {
-            volume,
-            equalizer,
-            spectrum,
-        } = chain;
-        let host = cpal::default_host();
-        let device = host
-            .default_output_device()
-            .context("no audio output device")?;
-
-        let default = device
-            .default_output_config()
-            .map_err(|error| anyhow::anyhow!("cannot read the output config: {error}"))?;
-
-        let device_name = ident(&device);
-        log::info!(
-            "sink: using {} at {} Hz, {} channels, {}",
-            device_name,
-            default.sample_rate(),
-            default.channels(),
-            default.sample_format()
-        );
-
-        let format = default.sample_format();
-        let frames = (BUFFER.as_secs_f64() * default.sample_rate() as f64).round() as u32;
-        let failed = Arc::new(AtomicBool::new(false));
-        let stream_failed = failed.clone();
-        let builder = DeviceSinkBuilder::default()
-            .with_device(device)
-            .with_config(&default.config())
-            .with_buffer_size(cpal::BufferSize::Fixed(frames))
-            .with_sample_format(format)
-            .with_error_callback(move |error| match error {
-                cpal::StreamError::BufferUnderrun => log::debug!("sink: buffer underrun"),
-                error => {
-                    log::warn!("sink: audio output failed: {error}");
-                    stream_failed.store(true, Ordering::Release);
-                }
-            });
-        let mut stream = builder
-            .open_stream()
-            .map_err(|error| anyhow::anyhow!("cannot open the audio output: {error}"))?;
-        stream.log_on_drop(false);
-
-        let applied = volume.get();
-        let tap = spectrum.attach();
-        let (sink, source) = rodio::Player::new();
-        let equalized = Equalized::new(source, equalizer);
-        stream
-            .mixer()
-            .add(SmoothGain::new(equalized, volume.clone(), applied, RAMP).with_tap(tap));
-
-        Ok(Self {
-            sink: Arc::new(sink),
-            volume,
-            device: device_name,
-            failed,
-            _stream: stream,
-        })
-    }
-
-    pub fn sink(&self) -> &Arc<rodio::Player> {
-        &self.sink
-    }
-
-    pub fn set_volume(&self, gain: f32) {
-        self.volume.set(gain);
-    }
-
-    pub fn failed(&self) -> bool {
-        self.failed.load(Ordering::Acquire)
-    }
-
-    pub fn changed(&self) -> bool {
-        cpal::default_host()
-            .default_output_device()
-            .map(|device| ident(&device))
-            .is_some_and(|device| device != "unknown" && device != self.device)
+impl Chain {
+    /// `source` run through the equalizer and then the volume ramp, with the spectrum tap at the
+    /// end, ready for the mixer. Every chunk queued on `source` publishes into `format`, and
+    /// `clamped` holds it within full scale, for a device whose integer samples would wrap.
+    pub(crate) fn apply<S: Source>(
+        &self,
+        source: S,
+        format: PublishedFormat,
+        clamped: bool,
+    ) -> Chained<S> {
+        Chained::new(source, self, format, clamped)
     }
 }
 
-pub struct SmoothGain<I> {
+/// A player's queue run through its `Chain`: the probe hears it, the equalizer filters it and
+/// the volume ramps it, then the tap and the meter hear it, and an integer device gets it held
+/// within full scale. One frame count places every sample for all of them.
+pub(crate) struct Chained<I> {
     input: I,
+    frames: Frames,
+    probe: Probe,
+    equalizer: FilterStage,
     volume: Volume,
-    tap: Option<Tap>,
+    tap: Tap,
+    /// Whether the tap hears the samples from before the gain. It is read once per frame so
+    /// every channel of a frame agrees.
+    unscaled: bool,
+    meter: Meter,
+    /// Whether the output is held within full scale, for a device whose integer samples would
+    /// wrap. The tap and the meter hear the sample before the clamp, so they still see the over.
+    clamped: bool,
 
     current: f32,
     target: f32,
     step: f32,
-
-    ramp: Duration,
     frames_left: u32,
     ramp_frames: u32,
-
-    channel: u16,
-    channels: u16,
-    rate: u32,
 }
 
-impl<I: Source> SmoothGain<I> {
-    pub fn new(input: I, volume: Volume, initial: f32, ramp: Duration) -> Self {
+impl<I: Source> Chained<I> {
+    fn new(input: I, chain: &Chain, format: PublishedFormat, clamped: bool) -> Self {
+        let gain = chain.volume.get();
         Self {
             input,
-            volume,
-            tap: None,
-            current: initial,
-            target: initial,
+            frames: Frames::new(format),
+            probe: chain.analyzer.probe(),
+            equalizer: FilterStage::new(chain.equalizer.clone()),
+            volume: chain.volume.clone(),
+            tap: chain.spectrum.attach(),
+            unscaled: false,
+            meter: chain.meter.clone(),
+            clamped,
+            current: gain,
+            target: gain,
             step: 0.0,
-            ramp,
             frames_left: 0,
             ramp_frames: 1,
-            channel: 0,
-            channels: 0,
-            rate: 0,
         }
     }
 
-    pub fn with_tap(mut self, tap: Tap) -> Self {
-        self.tap = Some(tap);
-        self
-    }
-
+    /// Takes up a new format. Every stage learns it, and the ramp keeps its length in time.
     fn resync(&mut self) {
-        let channels = self.input.channels().get();
-        let rate = self.input.sample_rate().get();
-        if channels == self.channels && rate == self.rate {
-            return;
-        }
-
-        self.channels = channels;
-        self.rate = rate;
-        if let Some(tap) = &self.tap {
-            tap.format(rate, channels);
-        }
-        self.ramp_frames = (self.ramp.as_secs_f64() * rate as f64).round().max(1.0) as u32;
+        let rate = self.frames.rate();
+        let channels = self.frames.channels();
+        self.equalizer.set_format(rate, channels);
+        self.probe.format(rate, channels);
+        self.tap.format(rate, channels);
+        self.ramp_frames = (RAMP.as_secs_f64() * rate as f64).round().max(1.0) as u32;
         self.frames_left = self.frames_left.min(self.ramp_frames);
     }
 }
 
-impl<I: Source> Iterator for SmoothGain<I> {
+impl<I: Source> Iterator for Chained<I> {
     type Item = f32;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let sample = self.input.next()?;
+        let (sample, place) = self.frames.pull(&mut self.input)?;
+        let Some(place) = place else {
+            return Some(sample);
+        };
 
-        if self.channel == 0 {
+        if place.changed {
             self.resync();
+        }
+        self.probe.hear(place.channel, sample);
+        if place.channel == 0 {
+            self.equalizer.begin();
+            self.unscaled = self.tap.absolute();
             let requested = self.volume.get().max(0.0);
 
             if requested.to_bits() != self.target.to_bits() {
@@ -216,21 +246,23 @@ impl<I: Source> Iterator for SmoothGain<I> {
             }
         }
 
-        let output = sample * self.current;
-        if let Some(tap) = self.tap.as_mut() {
-            tap.push(output);
-        }
+        let equalized = self.equalizer.process(usize::from(place.channel), sample);
+        let output = equalized * self.current;
+        let heard = match self.unscaled {
+            true => equalized,
+            false => output,
+        };
+        self.tap.push(place.channel, heard);
+        self.meter.record(output);
 
-        self.channel += 1;
-        if self.channel >= self.channels {
-            self.channel = 0;
-        }
-
-        Some(output)
+        Some(match self.clamped {
+            true => output.clamp(-1., FULL_SCALE),
+            false => output,
+        })
     }
 }
 
-impl<I: Source> Source for SmoothGain<I> {
+impl<I: Source> Source for Chained<I> {
     fn current_span_len(&self) -> Option<usize> {
         self.input.current_span_len()
     }
@@ -248,7 +280,9 @@ impl<I: Source> Source for SmoothGain<I> {
     }
 
     fn try_seek(&mut self, position: Duration) -> Result<(), SeekError> {
-        self.input.try_seek(position)
+        self.input.try_seek(position)?;
+        self.equalizer.reset();
+        Ok(())
     }
 }
 
@@ -258,26 +292,33 @@ pub struct Trimmed<I> {
     body: Option<u64>,
     emitted: u64,
     primed: bool,
-    lane: u64,
+    rate: u64,
+    channels: u64,
 }
 
 impl<I: Source> Trimmed<I> {
     pub fn new(input: I, skip: Duration, take: Option<Duration>) -> Self {
-        let lane = (input.sample_rate().get() as u64) * (input.channels().get() as u64);
-        let samples = |span: Duration| (span.as_secs_f64() * lane as f64).round() as u64;
+        let rate = input.sample_rate().get() as u64;
+        let channels = input.channels().get() as u64;
 
         Self {
-            head: samples(skip),
-            body: take.map(samples),
+            head: whole_frames(skip, rate, channels),
+            body: take.map(|take| whole_frames(take, rate, channels)),
             emitted: 0,
             primed: false,
-            lane,
+            rate,
+            channels,
             input,
         }
     }
 
     fn offset(&self) -> Duration {
-        Duration::from_secs_f64(self.head as f64 / self.lane as f64)
+        self.playing_time(self.head)
+    }
+
+    /// How long `samples` play for.
+    fn playing_time(&self, samples: u64) -> Duration {
+        Duration::from_secs_f64(samples as f64 / (self.rate * self.channels) as f64)
     }
 }
 
@@ -316,7 +357,7 @@ impl<I: Source> Source for Trimmed<I> {
 
     fn total_duration(&self) -> Option<Duration> {
         match self.body {
-            Some(body) => Some(Duration::from_secs_f64(body as f64 / self.lane as f64)),
+            Some(body) => Some(self.playing_time(body)),
             None => self
                 .input
                 .total_duration()
@@ -327,14 +368,13 @@ impl<I: Source> Source for Trimmed<I> {
     fn try_seek(&mut self, position: Duration) -> Result<(), SeekError> {
         self.input.try_seek(position + self.offset())?;
         self.primed = true;
-        self.emitted = (position.as_secs_f64() * self.lane as f64).round() as u64;
+        self.emitted = whole_frames(position, self.rate, self.channels);
         Ok(())
     }
 }
 
-fn ident(device: &cpal::Device) -> String {
-    device
-        .id()
-        .map(|id| id.to_string())
-        .unwrap_or_else(|_| "unknown".to_owned())
+/// The samples `span` covers at `rate` frames a second, rounded to whole frames, so a cut never
+/// lands between the channels of one frame and swaps them for the rest of the track.
+fn whole_frames(span: Duration, rate: u64, channels: u64) -> u64 {
+    (span.as_secs_f64() * rate as f64).round() as u64 * channels
 }

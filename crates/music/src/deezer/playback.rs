@@ -13,15 +13,16 @@ use rodio::Source as _;
 
 use crate::deezer::client::DeezerClient;
 use crate::deezer::{Stream, Striped};
-use crate::engine::{self, Fetch};
+use crate::engine::{self, Fetch, Loudness};
 use crate::stream::Reader;
-use crate::{PlaybackConfig, PlaybackEvents, PlaybackFactory, Player};
+use crate::{PlaybackConfig, PlaybackEvents, PlaybackFactory, Player, Quality};
 
-/// A track downloading and decrypting, and how long Deezer says it is.
+/// A track downloading and decrypting, and how long and how loud Deezer says it is.
 #[derive(Clone)]
 pub struct Loaded {
     stream: Stream,
     duration: Option<Duration>,
+    loudness: Option<Loudness>,
 }
 
 pub struct Factory {
@@ -39,6 +40,7 @@ impl PlaybackFactory for Factory {
         engine::start(
             Deezer {
                 client: self.client.clone(),
+                quality: config.quality,
             },
             config,
         )
@@ -47,6 +49,8 @@ impl PlaybackFactory for Factory {
 
 struct Deezer {
     client: DeezerClient,
+    /// The level every track is asked for at.
+    quality: Quality,
 }
 
 #[async_trait]
@@ -58,16 +62,29 @@ impl Fetch for Deezer {
         "deezer"
     }
 
-    /// Resolves the stream url and its key together, since one answer carries both, and starts
-    /// the download decrypting as it arrives.
+    /// Resolves the stream url and its key together, since one answer carries both, at the
+    /// chosen level or the best below it the license covers. The download starts decrypting as
+    /// it arrives.
     async fn load(&self, id: &str) -> Result<Loaded> {
-        let (response, key, duration) = self.client.open_stream(id).await?;
-        let stream = Stream::open(response, Striped::new(&key)).await?;
-        Ok(Loaded { stream, duration })
+        let opened = self.client.open_stream(id, self.quality).await?;
+        let stream = Stream::open(opened.response, Striped::new(&opened.key)).await?;
+        Ok(Loaded {
+            stream,
+            duration: opened.duration,
+            loudness: opened.loudness,
+        })
     }
 
     fn length(&self, loaded: &Loaded) -> Option<Duration> {
         loaded.duration
+    }
+
+    fn loudness(&self, loaded: &Loaded) -> Option<Loudness> {
+        loaded.loudness
+    }
+
+    async fn downloaded(&self, loaded: &Loaded) {
+        loaded.stream.finished().await;
     }
 
     /// Builds a decoder over a stream and places it at `at`. The bytes past the preroll are

@@ -3,7 +3,7 @@ use ui::{ActiveTheme as _, Filter, FilterChange, FlagAxis};
 
 use gpui::{AnyElement, App, Entity, SharedString};
 use i18n::t;
-use music::{SavedArtist, Shape};
+use music::SavedArtist;
 use state::{Library, LibraryPart, Origin, Playback, Shelf};
 use ui::rank::{ESSENTIAL, HANDY};
 use ui::{Cell, ColumnSpec, Menu, Pin, TableSource, Width};
@@ -70,13 +70,13 @@ impl ArtistSource {
 
     fn index_cell(&self, cell: &Cell<ArtistField>, artist: &SavedArtist, cx: &App) -> AnyElement {
         let origin = Origin::artist(artist.id.clone()).named(artist.name.clone());
-        let state = self.playback.read(cx).playing_from(&origin);
+        let playing = self.playback.read(cx).playing_from(&origin, cx);
         let played = origin.clone();
-        let press = cells::toggle(&self.playback, state.clone(), move |playback, cx| {
+        let press = cells::toggle(&self.playback, playing, move |playback, cx| {
             playback.play_origin(played.clone(), cx)
         });
 
-        cells::index(cell, state, true, None, None, press, cx)
+        cells::index(cell, playing, true, None, None, press, cx)
     }
 
     pub(super) fn at(&self, row: usize, cx: &App) -> Option<SavedArtist> {
@@ -89,7 +89,7 @@ impl ArtistSource {
 
     /// Whether the shelf lists more than the favorites, so a favorites filter has something to do.
     fn catalog(&self, cx: &App) -> bool {
-        self.library.read(cx).shape(self.shelf) == Shape::Catalog
+        self.library.read(cx).shape(self.shelf).is_catalog()
     }
 }
 
@@ -105,7 +105,7 @@ impl TableSource for ArtistSource {
     }
 
     fn matches(&self, row: usize, query: &str, cx: &App) -> bool {
-        self.at(row, cx).is_some_and(|artist| {
+        self.artists(cx).get(row).is_some_and(|artist| {
             if self.starred && !self.library.read(cx).saved_artist(&artist.id) {
                 return false;
             }
@@ -113,7 +113,7 @@ impl TableSource for ArtistSource {
         })
     }
 
-    fn filter_axes(&self, _query: &str, cx: &App) -> Vec<Filter> {
+    fn filter_axes(&self, cx: &App) -> Vec<Filter> {
         match self.catalog(cx) {
             true => vec![Filter::Flag(FlagAxis {
                 key: "filter-favorites",
@@ -145,7 +145,7 @@ impl TableSource for ArtistSource {
     fn playing(&self, row: usize, cx: &App) -> bool {
         self.artists(cx).get(row).is_some_and(|artist| {
             let origin = Origin::artist(artist.id.clone());
-            self.playback.read(cx).playing_from(&origin).is_some()
+            self.playback.read(cx).playing_from(&origin, cx).is_some()
         })
     }
 

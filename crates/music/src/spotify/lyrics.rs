@@ -8,9 +8,11 @@ use librespot_core::{Session, spclient::CLIENT_TOKEN};
 use serde::Deserialize;
 use tokio::sync::Mutex;
 
-use super::{auth, search};
+use super::{auth, pace, search};
 use crate::lyrics::{catalog, lrc};
-use crate::{Lyrics, LyricsHit, LyricsLine, LyricsProvider, LyricsQuery, LyricsWord, Voice};
+use crate::{
+    Lyrics, LyricsHit, LyricsLine, LyricsProvider, LyricsQuery, LyricsWord, Voice, escape,
+};
 
 const SOURCE: &str = "Spotify";
 
@@ -153,7 +155,8 @@ pub async fn lyrics(session: &Session, track_id: &str) -> Result<Option<Lyrics>>
     let request = Request::builder()
         .method(Method::GET)
         .uri(format!(
-            "{ENDPOINT}/{track_id}?format=json&vocalRemoval=false&market=from_token"
+            "{ENDPOINT}/{}?format=json&vocalRemoval=false&market=from_token",
+            escape::component(track_id)
         ))
         .header(header::ACCEPT, "application/json")
         .header("app-platform", APP_PLATFORM)
@@ -164,7 +167,7 @@ pub async fn lyrics(session: &Session, track_id: &str) -> Result<Option<Lyrics>>
         .header(CLIENT_TOKEN, client_token)
         .body(Bytes::new())
         .context("cannot build the Spotify lyrics request")?;
-    let body = match session.http_client().request_body(request).await {
+    let body = match pace::send(session, request).await {
         Ok(body) => body,
         Err(error) => {
             log::debug!("lyrics: spotify has none for {track_id}: {error}");

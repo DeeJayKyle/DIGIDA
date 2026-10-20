@@ -1,7 +1,11 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use gpui::{Context, Entity, Task};
-use music::{Album, AlbumDetail, ArtistRef, Contributor, Playlist, PlaylistDetail, Track};
+use music::{
+    Album, AlbumCatalogue, AlbumDetail, ArtistRef, Contributor, Playlist, PlaylistDetail,
+    ReleaseType, SavedArtist, Track,
+};
 use tokio::task::AbortHandle;
 
 use crate::{Io, Library, LibraryEvent, Session, SessionEvent, join, mosaic};
@@ -19,6 +23,8 @@ enum Loaded {
 
 pub struct Header {
     pub kind: Collection,
+    /// What kind of release an album is, `None` for a playlist.
+    pub release: Option<ReleaseType>,
     pub title: String,
     pub artist: Option<String>,
     pub artist_refs: Vec<ArtistRef>,
@@ -39,15 +45,20 @@ pub struct Detail {
     playlist: Option<Playlist>,
     tracks: Vec<Track>,
     continuation: Option<String>,
+    also_like: Vec<Album>,
+    similar: Vec<SavedArtist>,
     loading: bool,
     loading_more: bool,
     loaded: bool,
+    filling: bool,
     error: Option<String>,
     session: Entity<Session>,
     library: Entity<Library>,
     io: Io,
     task: Option<Task<()>>,
     request: Option<AbortHandle>,
+    fill: Option<Task<()>>,
+    filling_request: Option<AbortHandle>,
     mosaic: Option<Task<()>>,
 }
 
@@ -94,7 +105,11 @@ impl Detail {
         .detach();
 
         cx.subscribe(&library, |this, _, event, cx| match event {
-            LibraryEvent::TrackAdded { playlist }
+            LibraryEvent::PlaylistGone(id) if this.id.as_deref() == Some(id.as_str()) => {
+                this.clear();
+                cx.notify();
+            }
+            LibraryEvent::TrackAdded { playlist } | LibraryEvent::PlaylistChanged(playlist)
                 if this.id.as_deref() == Some(playlist.as_str()) =>
             {
                 this.load(Collection::Playlist, playlist.clone(), cx);
@@ -145,15 +160,20 @@ impl Detail {
             playlist: None,
             tracks: Vec::new(),
             continuation: None,
+            also_like: Vec::new(),
+            similar: Vec::new(),
             loading: false,
             loading_more: false,
             loaded: false,
+            filling: false,
             error: None,
             session,
             library,
             io,
             task: None,
             request: None,
+            fill: None,
+            filling_request: None,
             mosaic: None,
         }
     }
@@ -176,6 +196,25 @@ impl Detail {
 
     pub fn tracks(&self) -> &[Track] {
         &self.tracks
+    }
+
+    /// What the provider lists as related to the page's album, with more from the same
+    /// artist first and similar artists' releases topping the rail up, filled in behind
+    /// the tracks.
+    pub fn also_like(&self) -> &[Album] {
+        &self.also_like
+    }
+
+    /// The artists the provider lists as similar to the page's artist, filling the
+    /// rail's artists tab.
+    pub fn similar(&self) -> &[SavedArtist] {
+        &self.similar
+    }
+
+    /// Whether the recommendations are still on their way, after the tracks have already
+    /// put the page up.
+    pub fn is_filling(&self) -> bool {
+        self.filling
     }
 
     pub fn is_loading(&self) -> bool {
@@ -239,13 +278,29 @@ impl Detail {
         self.remove_tracks_from_playlist(vec![track_id], cx);
     }
 
+    /// Takes every copy of the named tracks out of the playlist on the page. The library is
+    /// told about each row the page shows of them, so its count and Undo cover every copy.
     pub fn remove_tracks_from_playlist(&mut self, track_ids: Vec<String>, cx: &mut Context<Self>) {
         let Some(playlist_id) = self.id.clone() else {
             log::warn!("detail: cannot remove a track without a playlist");
             return;
         };
+        let named: HashSet<&str> = track_ids.iter().map(String::as_str).collect();
+        let mut rows: Vec<String> = self
+            .tracks
+            .iter()
+            .filter_map(|track| track.id.clone())
+            .filter(|id| named.contains(id.as_str()))
+            .collect();
+        let mut counted: HashSet<String> = rows.iter().cloned().collect();
+        let unseen: Vec<String> = track_ids
+            .iter()
+            .filter(|id| counted.insert((*id).clone()))
+            .cloned()
+            .collect();
+        rows.extend(unseen);
         self.library.update(cx, |library, cx| {
-            library.remove_tracks_from_playlist(playlist_id, track_ids, cx);
+            library.remove_tracks_from_playlist(playlist_id, rows, cx);
         });
     }
 
@@ -424,6 +479,7 @@ impl Detail {
                     .cloned()
                     .collect();
                 self.continuation = None;
+                self.fill(cx);
             }
             Loaded::Playlist(detail) => {
                 let mut playlist = detail.playlist.clone();
@@ -445,7 +501,11 @@ impl Detail {
 
     fn clear(&mut self) {
         self.task = None;
+        self.fill = None;
         if let Some(request) = self.request.take() {
+            request.abort();
+        }
+        if let Some(request) = self.filling_request.take() {
             request.abort();
         }
         self.mosaic = None;
@@ -456,16 +516,82 @@ impl Detail {
         self.playlist = None;
         self.tracks.clear();
         self.continuation = None;
+        self.also_like.clear();
+        self.similar.clear();
         self.loading = false;
         self.loading_more = false;
         self.loaded = false;
+        self.filling = false;
         self.error = None;
+    }
+
+    /// Asks the provider for the rest of an album page once its tracks are up: related
+    /// releases, with more from the same artist and similar artists beside them. A provider
+    /// that answers
+    /// everything in `album` has nothing to add here and the page stays as it is.
+    fn fill(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self.id.clone() else {
+            return;
+        };
+        let artist = self.album.as_ref().and_then(|album| {
+            album
+                .artist_refs
+                .iter()
+                .find_map(|artist| artist.id.clone())
+        });
+        let Some(catalog) = self.session.read(cx).catalog(&id) else {
+            return;
+        };
+        if let Some(catalogue) = catalog.peek_album_catalogue(&id) {
+            self.absorb(&catalogue);
+            return;
+        }
+
+        self.filling = true;
+        let request = self.io.spawn({
+            let id = id.clone();
+            async move { catalog.album_catalogue(&id, artist.as_deref()).await }
+        });
+        self.filling_request = Some(request.abort_handle());
+        self.fill = Some(cx.spawn(async move |this, cx| {
+            let filled = join(request).await;
+
+            this.update(cx, |this, cx| {
+                if this.id.as_deref() != Some(id.as_str()) {
+                    return;
+                }
+
+                this.filling = false;
+                this.filling_request = None;
+                match filled {
+                    Ok(catalogue) => this.absorb(&catalogue),
+                    Err(error) => log::warn!("detail: cannot fill the page: {error:#}"),
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    /// Puts the catalogue over the tracks. Every list replaces what the page held, and
+    /// an empty one leaves that part of the page alone.
+    fn absorb(&mut self, catalogue: &AlbumCatalogue) {
+        if catalogue.is_empty() {
+            return;
+        }
+        if !catalogue.also_like.is_empty() {
+            self.also_like = catalogue.also_like.clone();
+        }
+        if !catalogue.similar.is_empty() {
+            self.similar = catalogue.similar.clone();
+        }
     }
 }
 
 fn album_header(album: &Album) -> Header {
     Header {
         kind: Collection::Album,
+        release: Some(album.release_type),
         title: album.name.clone(),
         artist: Some(album.artists.clone()),
         artist_refs: album.artist_refs.clone(),
@@ -496,6 +622,7 @@ fn playlist_header(playlist: &Playlist) -> Header {
 
     Header {
         kind: Collection::Playlist,
+        release: None,
         title: playlist.name.clone(),
         artist: None,
         artist_refs: Vec::new(),

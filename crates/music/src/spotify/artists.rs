@@ -9,6 +9,7 @@ use librespot_protocol::metadata::{Artist as ArtistMessage, Image};
 use protobuf::{EnumOrUnknown, Message as _};
 
 use crate::spotify::collection2::SavedItem;
+use crate::spotify::pace::paced;
 use crate::spotify::{albums, collection, collection2, pathfinder, wire};
 use crate::{Album, Artist, ArtistCatalogue, ArtistProfile, ReleaseType, SavedArtist, Track};
 
@@ -48,7 +49,11 @@ pub async fn catalogue(
     }
     let top_tracks = deepened(session, known, &albums).await;
 
-    Ok(ArtistCatalogue { albums, top_tracks })
+    Ok(ArtistCatalogue {
+        albums,
+        top_tracks,
+        ..Default::default()
+    })
 }
 
 pub async fn profile(session: &Session, artist_id: &str) -> Result<ArtistProfile> {
@@ -156,7 +161,9 @@ async fn popular(session: &Session, releases: &[Album], known: &[Track]) -> Resu
     Ok(rest)
 }
 
-async fn discography(session: &Session, artist_id: &str) -> Result<Vec<Album>> {
+/// Every release of an artist, newest first: the albums tab of an album page reads its
+/// more-from-the-artist half off this.
+pub(crate) async fn discography(session: &Session, artist_id: &str) -> Result<Vec<Album>> {
     let message = metadata(session, artist_id).await?;
     releases(session, &message).await
 }
@@ -186,9 +193,7 @@ fn newest_first(releases: impl Iterator<Item = Album>) -> Vec<Album> {
 async fn metadata(session: &Session, artist_id: &str) -> Result<ArtistMessage> {
     let uri = SpotifyUri::from_uri(&format!("{ARTIST_PREFIX}{artist_id}"))
         .context("invalid artist ID")?;
-    let body = session
-        .spclient()
-        .get_artist_metadata(&uri)
+    let body = paced(|| session.spclient().get_artist_metadata(&uri))
         .await
         .context("cannot read artist metadata")?;
     ArtistMessage::parse_from_bytes(&body).context("cannot decode artist metadata protobuf")
@@ -254,9 +259,7 @@ async fn cards(session: &Session, ids: &[String]) -> Result<HashMap<String, Save
         ..Default::default()
     };
 
-    let response = session
-        .spclient()
-        .get_extended_metadata(request)
+    let response = paced(|| session.spclient().get_extended_metadata(request.clone()))
         .await
         .context("cannot read artist portraits")?;
 

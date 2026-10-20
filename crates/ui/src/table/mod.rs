@@ -3,6 +3,7 @@ mod layout;
 use std::cell::Cell as StdCell;
 use std::cmp::Ordering;
 use std::collections::HashSet;
+use std::ops::Range;
 
 use gpui::prelude::*;
 use gpui::{
@@ -12,11 +13,14 @@ use gpui::{
     Window, actions, div, point, px, svg,
 };
 
+use crate::artwork::{PREFETCH_REACH, Prefetch};
 use crate::filters::FilterChange;
+use crate::glass::{blurring, popover_surface};
 use crate::menu::Menu;
 use crate::metrics::{snapped, text_width};
 use crate::pin::{Pin, Pinnable};
 use crate::popup::Popup;
+use crate::skeleton::Skeleton;
 use crate::theme::ActiveTheme as _;
 use crate::{Filter, SortAxis};
 
@@ -36,6 +40,11 @@ const GRIP: Pixels = px(9.);
 /// from behind the head is already drawn rather than popping in as the head lifts.
 const OVERSCAN: usize = 2;
 const OVERSCAN_ABOVE: usize = 1;
+/// How tall a skeleton bar stands against its row.
+const SKELETON_BAR: f32 = 0.3;
+/// How far a skeleton bar reaches across its cell, stepped by row and column so the column
+/// edges do not line up into a grid.
+const SKELETON_REACH: [f32; 5] = [0.6, 0.85, 0.45, 0.7, 0.55];
 
 pub const ROW_GROUP: &str = "table-row";
 
@@ -67,6 +76,15 @@ impl<F> Cell<F> {
             .h_full()
             .px(PADDING)
     }
+}
+
+/// The room a table holds while its source loads with nothing to show yet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pending {
+    /// The source knows how many rows are coming.
+    Rows(usize),
+    /// The count is unknown, so the skeletons fill the viewport.
+    Screen,
 }
 
 pub trait TableSource: 'static {
@@ -106,7 +124,9 @@ pub trait TableSource: 'static {
         true
     }
 
-    fn filter_axes(&self, _query: &str, _cx: &App) -> Vec<Filter> {
+    /// The axes the filter menu draws. They describe the whole list rather than the rows in
+    /// view, so a choice that narrows the table to nothing still leaves every axis standing.
+    fn filter_axes(&self, _cx: &App) -> Vec<Filter> {
         vec![]
     }
 
@@ -125,6 +145,12 @@ pub trait TableSource: 'static {
 
     fn is_loading(&self, _cx: &App) -> bool {
         false
+    }
+
+    /// The skeleton rows to draw while the source has no rows yet, so the page keeps the
+    /// height it is about to have. `None` leaves the table empty while it waits.
+    fn pending(&self, _cx: &App) -> Option<Pending> {
+        None
     }
 }
 
@@ -695,8 +721,82 @@ impl<S: TableSource> TableState<S> {
         scroll.set_offset(point(offset.x, offset.y - delta));
     }
 
-    fn height(&self, head: Pixels, row: Pixels) -> Pixels {
-        head + row * self.delegate.row_count() as f32
+    fn height(&self, head: Pixels, row: Pixels, count: usize) -> Pixels {
+        head + row * count as f32
+    }
+
+    /// How many skeleton rows stand in for a source still loading its first rows, and zero
+    /// once it has rows or asks for none.
+    fn placeholders(&self, row: Pixels, cx: &App) -> usize {
+        if self.delegate.row_count() > 0 {
+            return 0;
+        }
+        match self.delegate.source.pending(cx) {
+            None => 0,
+            Some(Pending::Rows(count)) => count,
+            Some(Pending::Screen) => (self.viewport.height / row).ceil().max(0.) as usize,
+        }
+    }
+
+    /// The skeleton rows in the virtualised window, one bar per column, laid out like the
+    /// rows that will replace them.
+    fn skeletons(
+        &self,
+        head: Pixels,
+        row_height: Pixels,
+        count: usize,
+        cx: &App,
+    ) -> Vec<AnyElement> {
+        let theme = cx.theme();
+        let first = self.viewport.first(head, row_height);
+        let last = (first + self.viewport.rows(row_height)).min(count);
+        let bar = row_height * SKELETON_BAR;
+
+        (first..last)
+            .map(|display| {
+                div()
+                    .id(("skeleton", display))
+                    .absolute()
+                    .top(head + row_height * display as f32)
+                    .left_0()
+                    .w_full()
+                    .h(row_height)
+                    .flex()
+                    .items_center()
+                    .border_b_1()
+                    .border_color(theme.table_row_border)
+                    .children(
+                        self.delegate
+                            .columns
+                            .iter()
+                            .enumerate()
+                            .map(|(ix, column)| {
+                                let inner = self.delegate.inner_width(ix);
+                                let skeleton = match column.spec.width {
+                                    Width::Thumb => Skeleton::new().size(theme.metrics.thumb),
+                                    _ => Skeleton::new()
+                                        .w(inner
+                                            * SKELETON_REACH[(display + ix) % SKELETON_REACH.len()])
+                                        .h(bar),
+                                };
+                                div()
+                                    .w(inner + PADDING * 2.)
+                                    .flex_none()
+                                    .h_full()
+                                    .px(PADDING)
+                                    .flex()
+                                    .items_center()
+                                    .map(|this| match column.spec.align {
+                                        TextAlign::Right => this.justify_end(),
+                                        TextAlign::Center => this.justify_center(),
+                                        _ => this,
+                                    })
+                                    .child(skeleton)
+                            }),
+                    )
+                    .into_any_element()
+            })
+            .collect()
     }
 
     pub fn delegate(&self) -> &TableDelegate<S> {
@@ -848,7 +948,11 @@ impl<S: TableSource> TableState<S> {
             .flex()
             .flex_none()
             .h(head)
-            .bg(theme.table_head)
+            .when_else(
+                blurring(cx),
+                |this| popover_surface(this, cx),
+                |this| this.bg(theme.table_head),
+            )
             .rounded_tl(top.top_left)
             .rounded_tr(top.top_right)
             .border_b_1()
@@ -952,7 +1056,7 @@ impl<S: TableSource> TableState<S> {
         let bottom = self.corners.bottom_left.max(self.corners.bottom_right);
         let marked = &self.delegate.marked;
 
-        (first..last)
+        let mut rows: Vec<AnyElement> = (first..last)
             .map(|display| {
                 let row = self.delegate.row(display);
                 let tail = display + 1 == count;
@@ -1037,7 +1141,43 @@ impl<S: TableSource> TableState<S> {
                     .children(cells)
                     .into_any_element()
             })
-            .collect()
+            .collect();
+        rows.push(
+            self.upcoming(first..last, row_height, cx)
+                .into_any_element(),
+        );
+        rows
+    }
+
+    /// The thumbnail cells of the rows within `PREFETCH_REACH` of the drawn ones, laid out
+    /// unseen so their covers are loading before they scroll in.
+    fn upcoming(&self, drawn: Range<usize>, row_height: Pixels, cx: &mut App) -> Prefetch {
+        let count = self.delegate.order.len();
+        let reach = (self.viewport.height * PREFETCH_REACH / row_height)
+            .ceil()
+            .max(0.) as usize;
+        let before = drawn.start.saturating_sub(reach)..drawn.start;
+        let after = drawn.end..(drawn.end + reach).min(count);
+
+        let mut cells = Vec::new();
+        for display in before.chain(after) {
+            let row = self.delegate.row(display);
+            for (ix, column) in self.delegate.columns.iter().enumerate() {
+                if !matches!(column.spec.width, Width::Thumb) {
+                    continue;
+                }
+                let cell = Cell {
+                    field: column.spec.field,
+                    width: self.delegate.inner_width(ix),
+                    height: row_height,
+                    align: column.spec.align,
+                    display,
+                    row,
+                };
+                cells.push(self.delegate.source.cell(cell, cx));
+            }
+        }
+        Prefetch::new(cells)
     }
 }
 
@@ -1115,14 +1255,21 @@ impl<S: TableSource> Render for TableState<S> {
         let metrics = cx.theme().metrics;
         let row = snapped(metrics.row, window);
         let head = snapped(metrics.header, window);
-        let height = self.height(head, row);
+        let placeholders = self.placeholders(row, cx);
+        let height = self.height(head, row, self.delegate.row_count().max(placeholders));
         let pinned = snapped(self.viewport.top.clamp(Pixels::ZERO, height - head), window);
         let top = unpinned(self.corners, pinned);
-        // Nothing passes behind the head, so it needs nothing behind it either: on a
-        // see-through window it is the page plus its own tint, the same glass as the
-        // rest. An opaque window keeps the page painted under it, which is what the
+        // With Blur UI on the rows pass behind the head and it frosts them in the material of a
+        // context menu. Without it nothing passes behind the head, so it needs nothing behind it
+        // either: on a see-through window it is the page plus its own tint, the same glass as
+        // the rest. An opaque window keeps the page painted under it, which is what the
         // head's own alpha has always been mixed against.
-        let backdrop = (!cx.theme().transparent).then(|| cx.theme().background);
+        let frosted = blurring(cx);
+        let backdrop = (!frosted && !cx.theme().transparent).then(|| cx.theme().background);
+        let masked = match frosted {
+            true => pinned,
+            false => pinned + head,
+        };
         let context_menu = self.context_menu.clone().and_then(|(rows, position)| {
             let visible = self.delegate.visible();
             self.delegate
@@ -1167,7 +1314,7 @@ impl<S: TableSource> Render for TableState<S> {
             .child(
                 div()
                     .absolute()
-                    .top(pinned + head)
+                    .top(masked)
                     .left_0()
                     .right_0()
                     .bottom_0()
@@ -1175,11 +1322,14 @@ impl<S: TableSource> Render for TableState<S> {
                     .child(
                         div()
                             .absolute()
-                            .top(-(pinned + head))
+                            .top(-masked)
                             .left_0()
                             .right_0()
                             .h(height)
-                            .children(self.rows(head, row, cx)),
+                            .children(match placeholders {
+                                0 => self.rows(head, row, cx),
+                                count => self.skeletons(head, row, count, cx),
+                            }),
                     ),
             )
             .child(
@@ -1262,6 +1412,7 @@ pub trait Listing {
     fn filters(&self, cx: &App) -> Vec<Filter>;
     fn filter(&self, change: FilterChange, cx: &mut App);
     fn filtering(&self, cx: &App) -> bool;
+    fn narrowed(&self, cx: &App) -> bool;
     fn toggles(&self, cx: &App) -> Vec<Toggle>;
     fn set_width(&self, width: Pixels, cx: &mut App);
     fn set_query(&self, query: &str, cx: &mut App);
@@ -1325,8 +1476,7 @@ impl<S: TableSource> Listing for Entity<TableState<S>> {
     }
 
     fn filters(&self, cx: &App) -> Vec<Filter> {
-        let delegate = self.read(cx).delegate();
-        delegate.source().filter_axes(delegate.query(), cx)
+        self.read(cx).delegate().source().filter_axes(cx)
     }
 
     fn filter(&self, change: FilterChange, cx: &mut App) {
@@ -1341,6 +1491,10 @@ impl<S: TableSource> Listing for Entity<TableState<S>> {
     fn filtering(&self, cx: &App) -> bool {
         let delegate = self.read(cx).delegate();
         !delegate.query().is_empty() || delegate.source().filtered(cx)
+    }
+
+    fn narrowed(&self, cx: &App) -> bool {
+        self.read(cx).delegate().source().filtered(cx)
     }
 
     fn set_width(&self, width: Pixels, cx: &mut App) {

@@ -1,14 +1,14 @@
 use std::cell::Cell;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use gpui::prelude::*;
 use gpui::{
     AnyElement, App, Background, Div, ElementId, Hsla, Pixels, ScrollHandle, ScrollWheelEvent,
-    StyleRefinement, Window, div, linear_color_stop, linear_gradient, px,
+    Stateful, StyleRefinement, Window, div, ease_in_out, linear_color_stop, linear_gradient, px,
 };
 
 use crate::button::Button;
-use crate::glass::{GLASS_FILL, glass};
+use crate::glass::{blurring, glass};
 use crate::glide::Glide;
 use crate::motion::{Motion, Motioned as _, animates};
 use crate::theme::ActiveTheme as _;
@@ -43,14 +43,16 @@ pub struct Tabs {
 /// behind it fades them out rather than cutting them off. There is no scrollbar.
 ///
 /// Colours come from the theme (`secondary`, `border`) and any caller style wins over them,
-/// so a call site stays in charge of the tint. `.blurred()` swaps the solid fill for
-/// `glass` under a soft shadow, iOS-style.
+/// so a call site stays in charge of the tint. `.blurred()` marks a bar that floats over
+/// content: it always casts a soft shadow, and swaps the solid fill for `glass` while
+/// `blurring` is on.
 #[derive(IntoElement)]
 pub struct TabBar {
     base: Div,
     id: ElementId,
     items: Vec<Button>,
     blurred: bool,
+    reveal: Option<usize>,
 }
 
 impl TabBar {
@@ -61,6 +63,7 @@ impl TabBar {
             id: id.into(),
             items: Vec::new(),
             blurred: false,
+            reveal: None,
         }
     }
 
@@ -71,6 +74,14 @@ impl TabBar {
 
     pub fn blurred(mut self) -> Self {
         self.blurred = true;
+        self
+    }
+
+    /// Scrolls a capped bar just far enough to show the item at `index` each time the index
+    /// changes, so a selection made elsewhere never waits behind an edge. While the index holds,
+    /// the row stays where the user left it.
+    pub fn reveal(mut self, index: Option<usize>) -> Self {
+        self.reveal = index;
         self
     }
 }
@@ -86,8 +97,9 @@ impl Styled for TabBar {
 enum Wash {
     /// The edge has tabs behind it.
     Full,
-    /// It no longer has, and the gradient is on its way out.
-    Leaving,
+    /// It no longer has, and the fade is on its way out: how much of it is left, from one at
+    /// the moment the edge emptied down to nothing once `HUSH` has passed.
+    Leaving(f32),
     None,
 }
 
@@ -110,6 +122,8 @@ struct Rail {
     seen: Cell<(Pixels, Pixels)>,
     /// The leading and trailing edge, in that order.
     edges: Cell<[Edge; 2]>,
+    /// The item the row was last asked to show.
+    revealed: Cell<Option<usize>>,
 }
 
 impl Rail {
@@ -119,6 +133,7 @@ impl Rail {
             glide: Glide::default(),
             seen: Cell::new((Pixels::ZERO, Pixels::ZERO)),
             edges: Cell::new([Edge::default(); 2]),
+            revealed: Cell::new(None),
         }
     }
 
@@ -149,7 +164,7 @@ impl Rail {
                 edge.leaving = None;
             }
             washes[side] = match edge.leaving {
-                Some(_) => Wash::Leaving,
+                Some(since) => Wash::Leaving(remaining(since, span)),
                 None => Wash::None,
             };
         }
@@ -185,8 +200,10 @@ impl RenderOnce for TabBar {
             id,
             items,
             blurred,
+            reveal,
         } = self;
         let theme = *cx.theme();
+        let glassy = blurred && blurring(cx);
         let rem = window.rem_size();
         let overrides = std::mem::take(base.style());
         // Caller styles win over the bar defaults below, so the rounding the
@@ -202,16 +219,23 @@ impl RenderOnce for TabBar {
         // Concentric corners: the items sit one padding inside the bar.
         let radius = (rounding - rem * PAD).max(px(0.));
         let capped = overrides.max_size.width.is_some();
-        // A glass bar has no flat fill for a fade to melt into, so there it uses the same
-        // wash the glass lays over its blur.
-        let fill = match blurred {
-            true => theme.popover.opacity(GLASS_FILL),
-            false => theme.secondary,
-        };
         let moving = animates(cx);
         let rails = capped.then(|| {
             let rail = window.use_keyed_state((id.clone(), "rail"), cx, |_, _| Rail::new());
             let rail = rail.read(cx);
+            // gpui measures the item against the row's bounds from the last layout, so a row
+            // that has not been laid out yet waits a frame before it scrolls
+            if rail.revealed.get() != reveal {
+                match rail.scroll.bounds().size.width > Pixels::ZERO {
+                    true => {
+                        rail.revealed.set(reveal);
+                        if let Some(index) = reveal {
+                            rail.scroll.scroll_to_item(index);
+                        }
+                    }
+                    false => window.request_animation_frame(),
+                }
+            }
             rail.glide.sync(&rail.scroll);
 
             let (at, hidden) = rail.reach();
@@ -255,6 +279,23 @@ impl RenderOnce for TabBar {
                     .into_iter()
                     .map(|item| item.flex_shrink_0().rounded(radius)),
             );
+        // A glass bar has no flat fill to paint a fade with: a wash of its own thin fill hides
+        // nothing. It fades the tabs themselves instead, and leaves the blur behind them whole.
+        let row = match (glassy, rails.as_ref()) {
+            (true, Some(rails)) => {
+                // The mask reads its strength off the rail's clock rather than an animation
+                // element, so nothing else asks for the frames it needs while an edge empties.
+                if rails
+                    .washes
+                    .iter()
+                    .any(|wash| matches!(wash, Wash::Leaving(_)))
+                {
+                    window.request_animation_frame();
+                }
+                masked(row, rails.washes).into_any_element()
+            }
+            _ => row.into_any_element(),
+        };
 
         let mut bar = base
             .relative()
@@ -264,15 +305,16 @@ impl RenderOnce for TabBar {
             .bg(theme.secondary)
             .border_1()
             .border_color(theme.border)
-            .when(blurred, |bar| glass(bar, cx).shadow_sm())
+            .when(blurred, |bar| bar.shadow_sm())
+            .when(glassy, |bar| glass(bar, cx))
             .child(row)
-            .when_some(rails, |bar, rails| {
+            .when_some(rails.filter(|_| !glassy), |bar, rails| {
                 bar.children(
                     rails
                         .washes
                         .into_iter()
                         .enumerate()
-                        .filter_map(|(side, wash)| fade(fill, radius, side == 0, wash)),
+                        .filter_map(|(side, wash)| fade(theme.secondary, radius, side == 0, wash)),
                 )
             });
 
@@ -305,13 +347,39 @@ fn fade(fill: Hsla, radius: Pixels, leading: bool, wash: Wash) -> Option<AnyElem
     match wash {
         Wash::None => None,
         Wash::Full => Some(strip.into_any_element()),
-        Wash::Leaving => Some(
+        Wash::Leaving(_) => Some(
             strip
                 .motion(("tab-fade", usize::from(leading)), HUSH, move |strip, t| {
                     strip.bg(melting(fill, angle, 1. - t))
                 })
                 .into_any_element(),
         ),
+    }
+}
+
+/// The row faded out towards each edge that has tabs behind it, for a glass bar. An edge on
+/// its way out narrows its fade by what `Wash::Leaving` says is left, so the scrolling row is
+/// never wrapped and keeps its place in the tree while an edge empties. With neither edge fading
+/// the row goes back unmasked, since even an empty mask opens a layer and drops every backdrop
+/// in it.
+fn masked(row: Stateful<Div>, washes: [Wash; 2]) -> Stateful<Div> {
+    let width = |wash| match wash {
+        Wash::Full => px(FADE),
+        Wash::Leaving(left) => px(FADE) * left,
+        Wash::None => Pixels::ZERO,
+    };
+    match washes {
+        [Wash::None, Wash::None] => row,
+        [leading, trailing] => row.fade_sides(width(leading), width(trailing)),
+    }
+}
+
+/// How much of a leaving edge's fade is left, eased the way `HUSH` eases, from one when the
+/// edge emptied down to nothing once `span` has passed.
+fn remaining(since: Instant, span: Duration) -> f32 {
+    match span.is_zero() {
+        true => 0.,
+        false => 1. - ease_in_out((since.elapsed().as_secs_f32() / span.as_secs_f32()).min(1.)),
     }
 }
 

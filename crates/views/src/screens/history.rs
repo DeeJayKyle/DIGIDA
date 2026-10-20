@@ -4,10 +4,10 @@ use gpui::{
 };
 use i18n::t;
 use music::Track;
-use state::{History, HistoryState, Playback};
+use state::{History, HistoryState, Playback, Sonora};
 use ui::{
     ActiveTheme as _, Button, Listing as _, Modal, Scrollbar, Scroller, TableDelegate, TableEvent,
-    TableState, clock, table, vacant,
+    TableState, runtime, table, vacant,
 };
 
 use crate::chrome::{Searchable, Toolbar, Tooled};
@@ -56,8 +56,10 @@ impl HistoryView {
                 HistoryTracks(history.clone()),
                 playback.clone(),
                 menu,
+                cx,
             )
             .with_history(history.clone())
+            .with_liked(Sonora::global(cx).library.clone())
             .table(cx.weak_entity());
             TableState::new(TableDelegate::new(source, width, cx), cx).follow(scroll)
         });
@@ -68,6 +70,12 @@ impl HistoryView {
         })
         .detach();
         cx.observe(&playback, |this, _, cx| {
+            this.table.refresh(cx);
+            cx.notify();
+        })
+        .detach();
+        let library = Sonora::global(cx).library.clone();
+        cx.observe(&library, |this, _, cx| {
             this.table.refresh(cx);
             cx.notify();
         })
@@ -120,7 +128,7 @@ impl HistoryView {
         };
         let mut strip = HeroMetaStrip::new().text(t!("count-songs", count = count));
         if !duration.is_zero() {
-            strip = strip.text(clock(duration));
+            strip = strip.text(runtime(duration));
         }
 
         PageHero::new("history-hero", t!("nav-history"))
@@ -188,6 +196,7 @@ impl Render for HistoryView {
 
         let note = self.note(cx);
         let page = Scroller::new("history-page", &self.scrollbar)
+            .bottom_inset(crate::chrome::Chrome::bottom(cx))
             .pt(inset)
             .pb(inset)
             .child(div().px(inset).child(self.header(cx)))

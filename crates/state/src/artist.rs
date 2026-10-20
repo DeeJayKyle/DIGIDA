@@ -1,14 +1,20 @@
 use std::sync::Arc;
 
-use gpui::{Context, Entity, Task};
+use gpui::{Context, Entity, EventEmitter, Task};
 use music::{Album, Artist, ArtistCatalogue, Track};
 use tokio::task::AbortHandle;
 
 use crate::{Io, Library, LibraryEvent, Session, SessionEvent, join};
 
+/// Signals that a local artist no longer has a page after the library changes.
+pub enum ArtistDetailEvent {
+    Gone(String),
+}
+
 pub struct ArtistDetail {
     id: Option<String>,
     artist: Option<Arc<Artist>>,
+    appears_on: Vec<Album>,
     loading: bool,
     error: Option<String>,
     session: Entity<Session>,
@@ -19,6 +25,8 @@ pub struct ArtistDetail {
     fill: Option<Task<()>>,
     filling_request: Option<AbortHandle>,
 }
+
+impl EventEmitter<ArtistDetailEvent> for ArtistDetail {}
 
 impl ArtistDetail {
     pub fn new(
@@ -70,6 +78,7 @@ impl ArtistDetail {
         Self {
             id: None,
             artist: None,
+            appears_on: Vec::new(),
             loading: false,
             error: None,
             session,
@@ -102,6 +111,11 @@ impl ArtistDetail {
             .as_ref()
             .map(|artist| artist.albums.as_slice())
             .unwrap_or_default()
+    }
+
+    /// What the artist guests on, filled in behind the overview.
+    pub fn appears_on(&self) -> &[Album] {
+        &self.appears_on
     }
 
     pub fn is_loading(&self) -> bool {
@@ -142,9 +156,23 @@ impl ArtistDetail {
         cx.notify();
 
         let id = id.to_owned();
+        let local = music::is_local_id(&id)
+            .then(|| self.session.read(cx).local_client())
+            .flatten();
         let request = self.io.spawn({
             let id = id.clone();
-            async move { catalog.artist(&id).await }
+            async move {
+                if let Some(client) = local
+                    && !client
+                        .all_artists()
+                        .await?
+                        .iter()
+                        .any(|artist| artist.id == id)
+                {
+                    return Ok(None);
+                }
+                catalog.artist(&id).await.map(Some)
+            }
         });
         self.request = Some(request.abort_handle());
         self.task = Some(cx.spawn(async move |this, cx| {
@@ -158,9 +186,13 @@ impl ArtistDetail {
                 this.loading = false;
                 this.request = None;
                 match crate::settled(loaded, cx) {
-                    Ok(artist) => {
+                    Ok(Some(artist)) => {
                         this.artist = Some(artist);
                         this.fill(&id, cx);
+                    }
+                    Ok(None) => {
+                        this.clear();
+                        cx.emit(ArtistDetailEvent::Gone(id));
                     }
                     Err(reason) => this.error = Some(reason),
                 }
@@ -213,7 +245,7 @@ impl ArtistDetail {
         }));
     }
 
-    /// Puts the catalogue over the overview. Either list replaces what the overview carried,
+    /// Puts the catalogue over the overview. Every list replaces what the overview carried,
     /// and an empty one leaves that part of the page alone.
     fn absorb(&mut self, catalogue: &ArtistCatalogue) {
         let Some(artist) = self.artist.as_mut() else {
@@ -229,6 +261,9 @@ impl ArtistDetail {
         if !catalogue.top_tracks.is_empty() {
             artist.top_tracks = catalogue.top_tracks.clone();
         }
+        if !catalogue.appears_on.is_empty() {
+            self.appears_on = catalogue.appears_on.clone();
+        }
     }
 
     fn clear(&mut self) {
@@ -242,6 +277,7 @@ impl ArtistDetail {
         }
         self.id = None;
         self.artist = None;
+        self.appears_on.clear();
         self.loading = false;
         self.filling = false;
         self.error = None;

@@ -1,13 +1,13 @@
 use gpui::prelude::*;
 use gpui::{
-    App, ClickEvent, Div, ElementId, Hsla, Interactivity, MouseButton, SharedString, Stateful,
-    StyleRefinement, Window, div, px, svg,
+    AnyElement, App, ClickEvent, Div, ElementId, Hsla, Interactivity, MouseButton, Pixels,
+    SharedString, Stateful, StyleRefinement, Window, div, px, relative, svg,
 };
 
-use crate::glass::frost;
+use crate::glass::{blurring, frost};
 use crate::metrics::Text;
 use crate::theme::ActiveTheme as _;
-use crate::tooltip::{Perch, Tooltip};
+use crate::tooltip::{Perch, Tipped as _};
 
 const FADED: f32 = 0.55;
 /// How much of a white tint a frosted ghost or outline button shows when hovered
@@ -15,6 +15,8 @@ const FADED: f32 = 0.55;
 /// laying a themed slab over it.
 const TINT_HOVER: f32 = 0.14;
 const TINT_ACTIVE: f32 = 0.24;
+/// How far a small button's label sits from its edge, which text set beside one lines up with.
+pub const SMALL_INSET: Pixels = px(8.);
 
 type Click = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
 
@@ -31,11 +33,15 @@ pub struct Button {
     base: Stateful<Div>,
     label: Option<SharedString>,
     icon: Option<SharedString>,
+    /// A small element drawn after the icon and before the label, as a picker's curve sketch.
+    leading: Option<AnyElement>,
+    detail: Option<SharedString>,
     trailing: Option<SharedString>,
     variant: Variant,
     small: bool,
     disabled: bool,
     selected: bool,
+    indicator: bool,
     backgroundless: bool,
     hoverless: bool,
     frosted: bool,
@@ -54,11 +60,14 @@ impl Button {
             base: div().id(id),
             label: None,
             icon: None,
+            leading: None,
+            detail: None,
             trailing: None,
             variant: Variant::Ghost,
             small: false,
             disabled: false,
             selected: false,
+            indicator: false,
             backgroundless: false,
             hoverless: false,
             frosted: false,
@@ -78,6 +87,18 @@ impl Button {
 
     pub fn icon(mut self, path: impl Into<SharedString>) -> Self {
         self.icon = Some(path.into());
+        self
+    }
+
+    pub fn leading(mut self, leading: impl IntoElement) -> Self {
+        self.leading = Some(leading.into_any_element());
+        self
+    }
+
+    /// A current value shown muted after the label and before the trailing icon, the way a row
+    /// that opens a page of its own says what is chosen there.
+    pub fn detail(mut self, detail: impl Into<SharedString>) -> Self {
+        self.detail = Some(detail.into());
         self
     }
 
@@ -140,6 +161,12 @@ impl Button {
 
     pub fn selected(mut self, selected: bool) -> Self {
         self.selected = selected;
+        self
+    }
+
+    /// Paints an active-state dot below the icon without changing the button's layout or hit area.
+    pub fn indicator(mut self, indicator: bool) -> Self {
+        self.indicator = indicator;
         self
     }
 
@@ -219,11 +246,14 @@ impl RenderOnce for Button {
             mut base,
             label,
             icon,
+            leading,
+            detail,
             trailing,
             variant,
             small,
             disabled,
             selected,
+            indicator,
             backgroundless,
             hoverless,
             frosted,
@@ -301,12 +331,15 @@ impl RenderOnce for Button {
         let selected_background = theme.secondary_active;
         let radius = theme.radius;
         let interactive = !disabled;
+        // The white hover tint follows `frosted` whatever the setting says, since it is
+        // there for a button floating over artwork; only the blur itself is optional.
+        let frosting = frosted && interactive && blurring(cx);
         let foreground = match disabled {
             true => palette.foreground,
             false => tint.unwrap_or(palette.foreground),
         };
         let (height, padding, gap) = match small {
-            true => (theme.metrics.control_small, px(8.), px(4.)),
+            true => (theme.metrics.control_small, SMALL_INSET, px(4.)),
             false => (theme.metrics.control, px(12.), px(6.)),
         };
         let (hover, active) = match interactive {
@@ -315,9 +348,9 @@ impl RenderOnce for Button {
         };
         let hovered = match hoverless {
             true => None,
-            false => state_style(hover, hovered, frosted && interactive),
+            false => state_style(hover, hovered, frosting),
         };
-        let pressed = state_style(active, pressed, frosted && interactive);
+        let pressed = state_style(active, pressed, frosting);
         let overrides = std::mem::take(base.style());
 
         let mut button = base
@@ -340,7 +373,7 @@ impl RenderOnce for Button {
             })
             .when(interactive, |this| this.cursor_pointer())
             .when_some(tooltip.filter(|_| interactive), |this, (key, perch)| {
-                this.tooltip(Tooltip::build(key, perch))
+                this.tip(key, perch)
             })
             .when_some(hovered, |this, style| this.hover(move |_| style))
             .when_some(pressed, |this, style| this.active(move |_| style))
@@ -353,13 +386,25 @@ impl RenderOnce for Button {
                         .text_color(foreground),
                 )
             })
+            .children(leading)
             .when_some(label, |this, label| {
                 this.child(
                     div()
                         .min_w_0()
                         .truncate()
-                        .when(trailing.is_some(), |this| this.flex_1())
+                        .when(trailing.is_some() || detail.is_some(), |this| this.flex_1())
                         .child(label),
+                )
+            })
+            .when_some(detail, |this, detail| {
+                this.child(
+                    div()
+                        .flex_none()
+                        .max_w(relative(0.5))
+                        .truncate()
+                        .text_size(theme.text(Text::Label))
+                        .text_color(theme.muted_foreground)
+                        .child(detail),
                 )
             })
             .when_some(trailing, |this, path| {
@@ -369,6 +414,19 @@ impl RenderOnce for Button {
                         .size(px(16.))
                         .flex_none()
                         .text_color(foreground),
+                )
+            })
+            .when(indicator, |this| {
+                let diameter = theme.metrics.pad * 0.375;
+                this.relative().child(
+                    div()
+                        .absolute()
+                        .left(relative(0.5))
+                        .ml(-diameter / 2.)
+                        .bottom(theme.metrics.pad * 0.125)
+                        .size(diameter)
+                        .rounded_full()
+                        .bg(foreground),
                 )
             })
             .when(interactive, |this| {

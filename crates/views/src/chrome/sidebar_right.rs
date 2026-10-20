@@ -58,6 +58,16 @@ impl SidebarRight {
         }
     }
 
+    /// The width the left sidebar has to leave free for this one. It counts an open sidebar
+    /// even while the window is too narrow to show it, so the left sidebar collapses first and
+    /// stays collapsed when this one hides in turn.
+    pub(crate) fn reserved_width(&self) -> Pixels {
+        match self.open {
+            false => Pixels::ZERO,
+            true => self.width,
+        }
+    }
+
     pub(crate) fn toggle(&mut self, cx: &mut Context<Self>) {
         self.open = !self.open;
         if self.open {
@@ -115,6 +125,7 @@ impl Render for SidebarRight {
         Panel::new("sidebar-right", Side::Right, self.width)
             .limits(MIN_WIDTH, MAX_WIDTH)
             .reach(super::cap(MIN_WIDTH, MAX_WIDTH, MIN_CONTENT, window))
+            .grip_above(super::Chrome::bottom(cx))
             .on_resize(cx.listener(|this, width: &Pixels, _, cx| {
                 this.width = *width;
                 this.persist(cx);
