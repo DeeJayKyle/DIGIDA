@@ -13,15 +13,16 @@ use gpui::{
 };
 use i18n::t;
 use music::{Shape, Track, Voice};
-use router::{Destination, LibraryTab, Link as _};
+use router::{Destination, LibraryTab, Link as _, navigate};
 use state::{
     AppSettings, Lyrics, LyricsState, Network, Playback, PlaybackState, Queue, RomanizationScripts,
     Shelf, SideTab, Sonora, Whence,
 };
 use ui::{
-    ActiveTheme as _, Button, Card, DraggedPin, Edge, Motion, Motioned as _, PREFETCH_REACH, Pin,
-    Pinnable as _, Popup, Scrollbar, Scroller, Spot, Springs, Text, Vacancy, drop_gap, drop_marker,
-    ease_out_cubic, ease_out_expo, eyebrow, faint, mix, prefetch, snapped, vacant,
+    ActiveTheme as _, Artwork, Button, Card, DraggedPin, Edge, InlineLink, InlineLinks, Motion,
+    Motioned as _, PREFETCH_REACH, Pin, Pinnable as _, Popup, Scrollbar, Scroller, Spot, Springs,
+    Text, Vacancy, drop_gap, drop_marker, ease_out_cubic, ease_out_expo, eyebrow, faint, mix,
+    prefetch, snapped, vacant,
 };
 
 use crate::chrome::{Chrome, section_label};
@@ -44,6 +45,9 @@ const AHEAD: f32 = 0.6;
 const REVEAL: f32 = 0.6;
 const ACTIVE_VERSE_GROWTH: Pixels = px(2.);
 const FULLSCREEN_VERSE_GROWTH: Pixels = px(3.);
+/// The most of the window's height the panel's cover may take, so the lyrics card under it
+/// keeps room on a short window.
+const COVER_SHARE: f32 = 0.4;
 const LYRICS_HORIZONTAL_INSET_REM: f32 = 1.5;
 // The largest window fullscreen lyrics keep their own size in. A larger one grows them by its
 // share of this one, so a verse keeps its size relative to the window.
@@ -361,6 +365,8 @@ pub(crate) struct Aside {
     settled: Vec<bool>,
     /// The same for the frame before, which the scroll handle's bounds describe.
     was_settled: Vec<bool>,
+    /// The width of the panel the aside sits in, which sizes the now-playing cover.
+    span: Pixels,
 }
 
 impl Aside {
@@ -460,7 +466,22 @@ impl Aside {
             sheet_layout: None,
             settled: Vec::new(),
             was_settled: Vec::new(),
+            span: px(0.),
         }
+    }
+
+    /// Tells the aside how wide its panel is, so the now-playing cover fills it.
+    pub(crate) fn fit(&mut self, width: Pixels, cx: &mut Context<Self>) {
+        if self.span != width {
+            self.span = width;
+            cx.notify();
+        }
+    }
+
+    /// Whether the lyrics tab is laid out as a now-playing page: cover, title and artists
+    /// over the verses in a card. Only the panel does this, never fullscreen.
+    fn staged(&self) -> bool {
+        self.titled && self.tab == SideTab::Lyrics
     }
 
     pub(crate) fn strip(&mut self) {
@@ -927,13 +948,28 @@ impl Aside {
             .h(snapped(theme.metrics.header, window))
             .px_2()
             .when(self.titled, |this| {
-                this.border_b_1().border_color(theme.border).child(eyebrow(
-                    match self.tab {
-                        SideTab::Queue => t!("queue-title"),
-                        SideTab::Lyrics => t!("lyrics-title"),
+                let (title, place) = match self.tab {
+                    SideTab::Queue => (t!("queue-title"), None),
+                    SideTab::Lyrics => match self.playing_from(cx) {
+                        Some((name, place)) => (name, Some(place)),
+                        None => (t!("lyrics-title"), None),
                     },
-                    cx,
-                ))
+                };
+                this.when(!self.staged(), |this| {
+                    this.border_b_1().border_color(theme.border)
+                })
+                .child(
+                    eyebrow(title, cx)
+                        .id("aside-source")
+                        .min_w_0()
+                        .flex_shrink(1.)
+                        .truncate()
+                        .when_some(place, |this, place| {
+                            this.cursor_pointer()
+                                .hover(|style| style.text_color(theme.foreground).underline())
+                                .link(place)
+                        }),
+                )
             })
             .when(!self.titled, |this| {
                 this.justify_end().pr(theme.metrics.control + px(8.))
@@ -990,6 +1026,103 @@ impl Aside {
                         ),
                 )
             })
+    }
+
+    /// The cover, title and artists of the current track, above the lyrics card.
+    fn now_playing(&self, window: &Window, cx: &mut Context<Self>) -> Option<Div> {
+        let theme = *cx.theme();
+        let track = self.playback.read(cx).track()?.clone();
+        let pad = theme.metrics.pad * 2.;
+        let side = (self.span - pad * 2.)
+            .min(window.viewport_size().height * COVER_SHARE)
+            .max(px(0.));
+        // The track carries a thumbnail; the album's full-size cover is fetched apart and
+        // drawn over it once it lands. A local file's cover is already full size.
+        let local = track.id.as_deref().is_some_and(music::is_local_id)
+            || track
+                .cover
+                .as_ref()
+                .is_some_and(|url| url.starts_with("file://"));
+        let large = Sonora::global(cx)
+            .cover
+            .read(cx)
+            .large()
+            .filter(|url| !local && track.cover.as_deref() != Some(*url))
+            .map(SharedString::from);
+
+        Some(
+            div()
+                .flex()
+                .flex_col()
+                .flex_none()
+                .gap_3()
+                .px(pad)
+                .pb(pad)
+                .child(
+                    div().flex().justify_center().child(
+                        div()
+                            .id("aside-artwork")
+                            .when_some(track.album_id.clone(), |this, album| {
+                                this.link(Destination::Album(album.into()))
+                            })
+                            .relative()
+                            .child(
+                                Artwork::new(track.cover.clone())
+                                    .size(side)
+                                    .corner_radius(theme.radius * 2.),
+                            )
+                            .when_some(large, |this, url| {
+                                this.child(
+                                    Artwork::new(Some(url))
+                                        .overlay()
+                                        .absolute()
+                                        .top_0()
+                                        .left_0()
+                                        .size(side)
+                                        .corner_radius(theme.radius * 2.),
+                                )
+                            }),
+                    ),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .min_w_0()
+                        .child(
+                            div()
+                                .id("aside-track")
+                                .min_w_0()
+                                .truncate()
+                                .text_size(theme.text(Text::Title))
+                                .font_weight(FontWeight::BOLD)
+                                .text_color(theme.foreground)
+                                .when_some(track.album_id.clone(), |this, album| {
+                                    this.hover(|style| style.underline())
+                                        .link(Destination::Album(album.into()))
+                                })
+                                .child(SharedString::from(track.name.clone())),
+                        )
+                        .child(
+                            InlineLinks::new(
+                                "aside-artists",
+                                track.artist_refs.iter().map(|artist| {
+                                    InlineLink::new(
+                                        artist.name.clone(),
+                                        artist.id.clone().map(Into::into),
+                                    )
+                                }),
+                                track.artists.clone(),
+                                theme.muted_foreground,
+                            )
+                            .text_size(theme.text(Text::Body))
+                            .truncate()
+                            .on_click(|id, cx| {
+                                navigate(Destination::Artist(id), cx);
+                            }),
+                        ),
+                ),
+        )
     }
 
     fn follow(&self, cx: &mut Context<Self>) -> Option<Div> {
@@ -1985,7 +2118,30 @@ impl Render for Aside {
                             cx.listener(|this, dragged: &DraggedPin, _, cx| this.land(dragged, cx)),
                         )
                     })
-                    .when(self.tab == SideTab::Lyrics, |this| {
+                    .when(self.staged(), |this| {
+                        let theme = *cx.theme();
+                        let pad = theme.metrics.pad * 2.;
+                        this.children(self.now_playing(window, cx)).child(
+                            div()
+                                .relative()
+                                .flex()
+                                .flex_col()
+                                .flex_1()
+                                .min_h_0()
+                                .mx(pad)
+                                .mb(pad)
+                                .rounded(theme.radius)
+                                .overflow_hidden()
+                                .border_1()
+                                .border_color(theme.border)
+                                .bg(theme.secondary)
+                                .child(eyebrow(t!("lyrics-title"), cx).px(pad).pt(pad))
+                                .child(self.verses(window, cx))
+                                .child(self.witness())
+                                .children(self.follow(cx)),
+                        )
+                    })
+                    .when(self.tab == SideTab::Lyrics && !self.staged(), |this| {
                         this.child(self.verses(window, cx)).child(self.witness())
                     })
                     .when(self.tab == SideTab::Queue && empty, |this| {
@@ -2005,7 +2161,7 @@ impl Render for Aside {
                                 ),
                         )
                     })
-                    .children(self.follow(cx))
+                    .when(!self.staged(), |this| this.children(self.follow(cx)))
                     .children(self.recall(sections, window, cx)),
             )
             .children(self.menu(cx))

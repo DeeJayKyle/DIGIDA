@@ -29,7 +29,11 @@ impl SidebarRight {
         let width = px(settings.read(cx).sidebar_right_width()).clamp(MIN_WIDTH, MAX_WIDTH);
         let open = settings.read(cx).sidebar_right_open();
         let tab = settings.read(cx).sidebar_right_tab();
-        let aside = cx.new(|cx| Aside::new(queue, playback, tab, cx));
+        let aside = cx.new(|cx| {
+            let mut aside = Aside::new(queue, playback, tab, cx);
+            aside.fit(width, cx);
+            aside
+        });
 
         Self {
             aside,
@@ -127,6 +131,7 @@ impl Render for SidebarRight {
             .reach(super::cap(MIN_WIDTH, MAX_WIDTH, MIN_CONTENT, window))
             .on_resize(cx.listener(|this, width: &Pixels, _, cx| {
                 this.width = *width;
+                this.aside.update(cx, |aside, cx| aside.fit(*width, cx));
                 this.persist(cx);
                 cx.notify();
             }))

@@ -9,6 +9,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- The lyrics panel now shows what is playing: the playlist or album it is playing from, a large
+  cover, the title and artists, with the lyrics in a card below. Click any of them to open it.
 - Pages, lyrics, the queue and pinned items scroll beneath a translucent, frosted player bar. You
   can turn it off, and choose a Classic, Compact or Centered layout, in Settings → Appearance →
   Player bar. Centered puts the cover and playback buttons on the left, track
