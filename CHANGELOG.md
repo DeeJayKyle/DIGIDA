@@ -7,6 +7,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Local songs show lyrics from a `.ttml` file of the same name beside them, word by word.
+
 ### Changed
 
 - When Spotify refuses to play on your account, a Why? button opens the FAQ explaining it.
