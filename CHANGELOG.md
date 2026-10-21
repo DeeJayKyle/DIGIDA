@@ -10,6 +10,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Changed
 
 - When Spotify refuses to play on your account, a Why? button opens the FAQ explaining it.
+- Sorting by Date added puts the songs you added most recently first.
 
 ### Fixed
 
