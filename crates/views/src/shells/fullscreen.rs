@@ -737,7 +737,7 @@ impl FullscreenView {
                         .colors(theme.progress_bar, empty, theme.foreground)
                         .ranges(
                             Sonora::global(cx).sponsorblock.read(cx).ranges(cx),
-                            theme.foreground.opacity(0.18),
+                            theme.foreground.opacity(0.4),
                         )
                         .enabled(seekable)
                         .when_some(bubble, |this, (at, text)| this.bubble(at, text))

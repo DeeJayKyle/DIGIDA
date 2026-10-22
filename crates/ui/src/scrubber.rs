@@ -136,7 +136,7 @@ impl Scrubber {
     }
 
     /// Marks fractional ranges without changing pointer or drag behavior. Passed sections use
-    /// the empty track's tint so they stay visible over the filled track.
+    /// a blend toward the theme background so they stay visible over the filled track.
     pub fn ranges(mut self, ranges: impl IntoIterator<Item = (f32, f32)>, color: Hsla) -> Self {
         self.ranges = ranges
             .into_iter()
@@ -262,7 +262,11 @@ impl RenderOnce for Scrubber {
             .into_iter()
             .flat_map(|(start, end, color)| {
                 [
-                    (start, end.min(fraction), empty),
+                    (
+                        start,
+                        end.min(fraction),
+                        filled.blend(cx.theme().background.opacity(0.45)),
+                    ),
                     (start.max(fraction), end, color),
                 ]
             })
