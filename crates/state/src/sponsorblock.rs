@@ -1,8 +1,14 @@
+use std::time::Duration;
+
 use gpui::{Context, Entity, Task};
+use moka::sync::Cache;
 use music::{SkipSegment, SponsorBlock as Client};
 
 use crate::playback::PlaybackEvent;
 use crate::{AppSettings, Io, Network, Playback, PlaybackState, Session, SessionEvent, join};
+
+const CACHE_CAPACITY: u64 = 32;
+const CACHE_TTL: Duration = Duration::from_secs(15 * 60);
 
 /// Follows local YouTube playback and seeks over sections marked by SponsorBlock.
 pub(crate) struct SponsorBlock {
@@ -12,6 +18,7 @@ pub(crate) struct SponsorBlock {
     client: Client,
     video: Option<String>,
     segments: Vec<SkipSegment>,
+    cache: Cache<String, Vec<SkipSegment>>,
     /// The last attempted skip, until the engine confirms it landed outside that section.
     skipped: Option<usize>,
     lookup: Option<Task<()>>,
@@ -33,6 +40,9 @@ impl SponsorBlock {
         cx.observe(&session, |this, _, cx| this.follow(cx)).detach();
         cx.observe(network, |this, _, cx| this.follow(cx)).detach();
         cx.subscribe(&session, |this, _, event, _| {
+            if matches!(event, SessionEvent::SignedOut) {
+                this.cache.invalidate_all();
+            }
             if matches!(event, SessionEvent::SignedOut | SessionEvent::WentOffline) {
                 this.clear();
             }
@@ -58,6 +68,10 @@ impl SponsorBlock {
             client: Client::default(),
             video: None,
             segments: Vec::new(),
+            cache: Cache::builder()
+                .max_capacity(CACHE_CAPACITY)
+                .time_to_live(CACHE_TTL)
+                .build(),
             skipped: None,
             lookup: None,
             cancel: None,
@@ -85,6 +99,11 @@ impl SponsorBlock {
             self.clear();
             self.video = video;
             if let Some(video) = self.video.clone() {
+                if let Some(segments) = self.cache.get(&video) {
+                    self.segments = segments;
+                    self.skip(cx);
+                    return;
+                }
                 let client = self.client.clone();
                 let io = Io::global(cx);
                 let (cancel, cancelled) = tokio::sync::oneshot::channel::<()>();
@@ -103,7 +122,10 @@ impl SponsorBlock {
                             return;
                         }
                         match found {
-                            Ok(segments) => this.segments = segments,
+                            Ok(segments) => {
+                                this.cache.insert(video.clone(), segments.clone());
+                                this.segments = segments;
+                            }
                             Err(error) => log::warn!("sponsorblock: {error:#}"),
                         }
                         this.follow(cx);
@@ -123,25 +145,30 @@ impl SponsorBlock {
             return;
         }
         let at = playback.live_position();
-        let Some(index) = self
-            .segments
-            .iter()
-            .position(|segment| at >= segment.start && at < segment.end)
-        else {
+        let duration = playback
+            .track()
+            .map(|track| track.duration)
+            .unwrap_or_default();
+        let Some(index) = self.segments.iter().position(|segment| {
+            segment.matches_duration(duration) && at >= segment.start && at < segment.end
+        }) else {
             return;
         };
         if self.skipped == Some(index) {
             return;
         }
         let segment = self.segments[index];
-        let duration = playback
-            .track()
-            .map(|track| track.duration)
-            .unwrap_or_default();
-        let end = match duration.is_zero() {
-            true => segment.end,
-            false => segment.end.min(duration),
-        };
+        // Join only sections matching this recording, even when categories overlap.
+        let mut end = segment.end;
+        for next in &self.segments[index + 1..] {
+            if next.start > end {
+                break;
+            }
+            if next.matches_duration(duration) {
+                end = end.max(next.end);
+            }
+        }
+        let end = end.min(duration);
         if end > at {
             self.skipped = Some(index);
             self.playback.update(cx, |playback, cx| {
