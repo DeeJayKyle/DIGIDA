@@ -34,6 +34,7 @@ mod sheets;
 mod signal;
 mod snapshot;
 mod song;
+mod sponsorblock;
 mod tags;
 mod toast;
 mod updates;
@@ -196,6 +197,7 @@ pub struct Sonora {
     pub outputs: Entity<Outputs>,
     pub pins: Entity<Pins>,
     pub playback: Entity<Playback>,
+    _sponsorblock: Entity<sponsorblock::SponsorBlock>,
     /// The window that mints YouTube's proof-of-origin token. Nothing reads it; it is held so
     /// that it keeps ticking.
     pub potoken: Entity<potoken::PoToken>,
@@ -274,6 +276,15 @@ pub fn init(
         )
     });
     let outputs = cx.new(|cx| Outputs::new(settings.clone(), playback.clone(), cx));
+    let sponsorblock = cx.new(|cx| {
+        sponsorblock::SponsorBlock::new(
+            playback.clone(),
+            session.clone(),
+            settings.clone(),
+            &network,
+            cx,
+        )
+    });
     let downloads = cx.new(|cx| {
         Downloads::new(
             session.clone(),
@@ -357,6 +368,7 @@ pub fn init(
     );
 
     cx.set_global(Sonora {
+        _sponsorblock: sponsorblock,
         session,
         cover,
         devices,

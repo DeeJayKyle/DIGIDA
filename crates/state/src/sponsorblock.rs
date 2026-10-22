@@ -1,0 +1,152 @@
+use gpui::{Context, Entity, Task};
+use music::{SkipSegment, SponsorBlock as Client};
+
+use crate::playback::PlaybackEvent;
+use crate::{AppSettings, Io, Network, Playback, PlaybackState, Session, SessionEvent, join};
+
+/// Follows local YouTube playback and seeks over sections marked by SponsorBlock.
+pub(crate) struct SponsorBlock {
+    playback: Entity<Playback>,
+    session: Entity<Session>,
+    settings: Entity<AppSettings>,
+    client: Client,
+    video: Option<String>,
+    segments: Vec<SkipSegment>,
+    /// The last attempted skip, until the engine confirms it landed outside that section.
+    skipped: Option<usize>,
+    lookup: Option<Task<()>>,
+    cancel: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
+impl SponsorBlock {
+    pub fn new(
+        playback: Entity<Playback>,
+        session: Entity<Session>,
+        settings: Entity<AppSettings>,
+        network: &Entity<Network>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        cx.observe(&playback, |this, _, cx| this.follow(cx))
+            .detach();
+        cx.observe(&settings, |this, _, cx| this.follow(cx))
+            .detach();
+        cx.observe(&session, |this, _, cx| this.follow(cx)).detach();
+        cx.observe(network, |this, _, cx| this.follow(cx)).detach();
+        cx.subscribe(&session, |this, _, event, _| {
+            if matches!(event, SessionEvent::SignedOut | SessionEvent::WentOffline) {
+                this.clear();
+            }
+        })
+        .detach();
+        cx.subscribe(&playback, |this, playback, event, cx| match event {
+            PlaybackEvent::EndedPlayback => this.clear(),
+            PlaybackEvent::Seeked => {
+                let at = playback.read(cx).position();
+                if let Some(segment) = this.skipped.and_then(|index| this.segments.get(index))
+                    && (at < segment.start || at >= segment.end)
+                {
+                    this.skipped = None;
+                }
+            }
+            _ => {}
+        })
+        .detach();
+        Self {
+            playback,
+            session,
+            settings,
+            client: Client::default(),
+            video: None,
+            segments: Vec::new(),
+            skipped: None,
+            lookup: None,
+            cancel: None,
+        }
+    }
+
+    fn clear(&mut self) {
+        self.cancel = None;
+        self.lookup = None;
+        self.video = None;
+        self.segments.clear();
+        self.skipped = None;
+    }
+
+    /// A lookup never holds up playback; changing tracks or disabling the setting drops it.
+    fn follow(&mut self, cx: &mut Context<Self>) {
+        let video = self.playback.read(cx).track().and_then(|track| {
+            let id = track.id.as_deref()?;
+            (self.settings.read(cx).sponsorblock()
+                && !Network::lost(cx)
+                && self.session.read(cx).slug_for(id) == Some("youtube"))
+            .then(|| id.to_owned())
+        });
+        if video != self.video {
+            self.clear();
+            self.video = video;
+            if let Some(video) = self.video.clone() {
+                let client = self.client.clone();
+                let io = Io::global(cx);
+                let (cancel, cancelled) = tokio::sync::oneshot::channel::<()>();
+                self.cancel = Some(cancel);
+                self.lookup = Some(cx.spawn(async move |this, cx| {
+                    let requested = video.clone();
+                    let found = join(io.spawn(async move {
+                        tokio::select! {
+                            found = client.segments(&requested) => found,
+                            _ = cancelled => Ok(Vec::new()),
+                        }
+                    }))
+                    .await;
+                    this.update(cx, |this, cx| {
+                        if this.video.as_deref() != Some(video.as_str()) {
+                            return;
+                        }
+                        match found {
+                            Ok(segments) => this.segments = segments,
+                            Err(error) => log::warn!("sponsorblock: {error:#}"),
+                        }
+                        this.follow(cx);
+                        cx.notify();
+                    })
+                    .ok();
+                }));
+            }
+        }
+        self.skip(cx);
+    }
+
+    /// Retains sections for replay, but attempts each skip once until its seek lands.
+    fn skip(&mut self, cx: &mut Context<Self>) {
+        let playback = self.playback.read(cx);
+        if playback.state() != &PlaybackState::Playing {
+            return;
+        }
+        let at = playback.live_position();
+        let Some(index) = self
+            .segments
+            .iter()
+            .position(|segment| at >= segment.start && at < segment.end)
+        else {
+            return;
+        };
+        if self.skipped == Some(index) {
+            return;
+        }
+        let segment = self.segments[index];
+        let duration = playback
+            .track()
+            .map(|track| track.duration)
+            .unwrap_or_default();
+        let end = match duration.is_zero() {
+            true => segment.end,
+            false => segment.end.min(duration),
+        };
+        if end > at {
+            self.skipped = Some(index);
+            self.playback.update(cx, |playback, cx| {
+                playback.locally(cx, |playback, cx| playback.seek(end, cx));
+            });
+        }
+    }
+}
