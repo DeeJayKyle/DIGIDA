@@ -135,7 +135,8 @@ impl Scrubber {
         self
     }
 
-    /// Marks fractional ranges on the track without changing its pointer or drag behavior.
+    /// Marks fractional ranges without changing pointer or drag behavior. Passed sections use
+    /// the empty track's tint so they stay visible over the filled track.
     pub fn ranges(mut self, ranges: impl IntoIterator<Item = (f32, f32)>, color: Hsla) -> Self {
         self.ranges = ranges
             .into_iter()
@@ -256,6 +257,17 @@ impl RenderOnce for Scrubber {
             true => pin / 2.,
             false => Pixels::ZERO,
         };
+
+        let ranges: Vec<_> = ranges
+            .into_iter()
+            .flat_map(|(start, end, color)| {
+                [
+                    (start, end.min(fraction), empty),
+                    (start.max(fraction), end, color),
+                ]
+            })
+            .filter(|(start, end, _)| end > start)
+            .collect();
 
         let bar = match vertical {
             true => div()
