@@ -1,5 +1,6 @@
 mod aside;
 mod devices;
+mod downloads;
 mod jam;
 mod notice;
 mod output_picker;

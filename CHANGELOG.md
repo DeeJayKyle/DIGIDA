@@ -7,6 +7,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- A download button in the title bar while anything downloads. It lists each album, playlist and
+  song with its cover, how far it has got and a rough time left, and the tracks running now. Click
+  a row to open it, or the cross to cancel that download.
+
+### Changed
+
+- Closing a download's toast no longer cancels the download. Cancel it from the title bar button.
+- After Spotify refuses a burst of downloads, Sonora checks back every fifteen seconds without
+  fetching a song first, and carries on as soon as Spotify allows it, so a big playlist finishes
+  sooner.
+
 ## [0.44.1] - 2026-10-22
 
 ### Added
