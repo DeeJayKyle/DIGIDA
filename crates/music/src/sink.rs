@@ -184,9 +184,9 @@ impl Spares {
     }
 }
 
-/// One packet in the output queue. It ends as soon as the cue moves on a generation and counts
-/// itself out when dropped, whichever way it went, so `live` is the number still queued. Its
-/// buffer goes back to the spares when it drops.
+/// One packet in the output queue. Once the cue moves on a generation it ends at the end of the
+/// frame it is in, and it counts itself out when dropped, whichever way it went, so `live` is the
+/// number still queued. Its buffer goes back to the spares when it drops.
 struct Chunk {
     samples: Vec<f32>,
     /// The next sample to hand out.
@@ -224,27 +224,49 @@ impl Chunk {
             spares: spares.clone(),
         }
     }
+
+    /// Whether no clear has retired the chunk.
+    fn current(&self) -> bool {
+        self.generation.load(Ordering::Relaxed) == self.born
+    }
+
+    /// Where the chunk stops: after its last sample, or at the end of the frame it is in once a
+    /// clear has retired it. rodio takes whole frames, and a source that stops mid-frame shifts
+    /// the channels of everything played after it.
+    fn end(&self) -> usize {
+        match self.current() {
+            true => self.samples.len(),
+            false => self
+                .at
+                .next_multiple_of(usize::from(self.channels.get()))
+                .min(self.samples.len()),
+        }
+    }
 }
 
 impl Iterator for Chunk {
     type Item = f32;
 
+    /// The next sample. What finishes the frame after a clear is not counted as played, since
+    /// the position belongs to the new generation by then.
     fn next(&mut self) -> Option<f32> {
-        if self.generation.load(Ordering::Relaxed) != self.born {
+        if self.at >= self.end() {
             return None;
         }
-        let sample = *self.samples.get(self.at)?;
+        let sample = self.samples[self.at];
         if self.at == 0 {
             self.format.publish(self.rate, self.channels);
         }
         self.at += 1;
-        self.played.fetch_add(1, Ordering::Relaxed);
+        if self.current() {
+            self.played.fetch_add(1, Ordering::Relaxed);
+        }
         Some(sample)
     }
 }
 
 impl Source for Chunk {
-    /// What is left of the packet, and nothing once a clear has retired it. rodio reads the
+    /// What is left of the packet, or of its frame once a clear has retired it. rodio reads the
     /// format again only where a span ends, so a span that ran on past this packet would play
     /// the next one in this one's channel count.
     ///
@@ -253,10 +275,7 @@ impl Source for Chunk {
     ///
     /// TODO: When updating rodio, check if this behavior changed, and adjust this code accordingly.
     fn current_span_len(&self) -> Option<usize> {
-        match self.generation.load(Ordering::Relaxed) == self.born {
-            true => Some(self.samples.len() - self.at),
-            false => Some(0),
-        }
+        Some(self.end().saturating_sub(self.at))
     }
 
     fn channels(&self) -> ChannelCount {
