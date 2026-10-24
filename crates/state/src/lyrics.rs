@@ -775,6 +775,9 @@ mod tests {
             album: None,
             duration: None,
             writers: Vec::new(),
+            origin: None,
+            contributors: Vec::new(),
+            expires: None,
         }
     }
 

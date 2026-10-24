@@ -336,6 +336,9 @@ mod tests {
             album: None,
             duration: Some(Duration::from_secs(seconds)),
             writers: Vec::new(),
+            origin: None,
+            contributors: Vec::new(),
+            expires: None,
         }
     }
 

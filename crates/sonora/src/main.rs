@@ -121,6 +121,7 @@ fn main() {
             Arc::new(music::lrclib::LrcLib::new()),
             Arc::new(music::kugou::Kugou::new()),
             Arc::new(music::netease::NetEase::new()),
+            Arc::new(music::spotify::SpicyLyrics::from_env()),
         ];
         state::init(cx, io, database, providers, local_provider, lyrics);
         #[cfg(target_os = "windows")]
