@@ -1,5 +1,5 @@
 use gpui::prelude::*;
-use gpui::{App, ClickEvent, ClipboardItem, Context, Entity, SharedString, Window};
+use gpui::{App, ClickEvent, ClipboardItem, Context, Entity, SharedString, Window, div};
 use i18n::t;
 use music::{Album, GenreItem, MediaKind, Playlist, SavedArtist, Track};
 use router::{Destination, navigate};
@@ -7,12 +7,13 @@ use state::{
     Addition, Collection, Detail, History, Library, Origin, Outcome, Playback, Progress, Shelf,
     Sonora, Toasts,
 };
-use ui::{Menu, MenuItem, MenuSearch, Pin, PinKind, Scrollbar, SubmenuState};
+use ui::{ActiveTheme as _, Menu, MenuItem, MenuSearch, Pin, PinKind, Scrollbar, SubmenuState};
 
 use crate::shared::confirm::Confirm;
 use crate::shared::pins::Pinned as _;
 use crate::shared::playlist_editor::{Edit, PlaylistEditor};
 use crate::shared::tag_editor::TagEditor;
+use crate::shared::transport::rating;
 
 /// Something a context menu can open on, wherever it was clicked.
 #[derive(Clone)]
@@ -175,12 +176,14 @@ impl ItemMenu {
     /// never checked, since its tracks are only read once it is added.
     fn playlists(&self, addition: Addition, shelf: Shelf, many: bool, cx: &App) -> Menu {
         let library = Sonora::global(cx).library.clone();
+        let ratings = Sonora::global(cx).ratings.clone();
         let playlists: Vec<Playlist> = library
             .read(cx)
             .state(shelf)
             .playlists()
             .iter()
             .filter(|playlist| playlist.owned || playlist.collaborative)
+            .filter(|playlist| !ratings.read(cx).is_rating_playlist(&playlist.id))
             .cloned()
             .collect();
         let ids = match &addition {
@@ -380,7 +383,6 @@ impl ItemMenu {
                     .disabled(),
             ),
         };
-        let toggle_library = library_toggle(tracks, &library, cx);
         let editable = Sonora::global(cx)
             .session
             .read(cx)
@@ -390,6 +392,20 @@ impl ItemMenu {
         let download = (!imported)
             .then(|| download_item(tracks, &ids, cx))
             .flatten();
+
+        let favourite = match (!many, Sonora::global(cx).ratings.read(cx).enabled(cx)) {
+            (true, true) => rating("menu-rating", Some(track), None, false).map(|stars| {
+                let row = div()
+                    .flex()
+                    .justify_center()
+                    .items_center()
+                    .gap(cx.theme().metrics.pad / 2.)
+                    .child(stars);
+                MenuItem::new("rate-track", "").content(row)
+            }),
+            _ => None,
+        }
+        .unwrap_or_else(|| library_toggle(tracks, &library, cx));
 
         let album = match (many, columns.album, track.album_id.clone()) {
             (true, _, _) | (false, true, _) => None,
@@ -499,7 +515,7 @@ impl ItemMenu {
             vec![
                 add_to_playlist
                     .into_iter()
-                    .chain([library_action.unwrap_or(toggle_library)])
+                    .chain([library_action.unwrap_or(favourite)])
                     .chain(membership)
                     .chain(download)
                     .collect(),

@@ -23,6 +23,7 @@ mod playback;
 mod potoken;
 mod profile;
 mod queue;
+mod ratings;
 mod remote;
 mod requirements;
 mod scan;
@@ -65,6 +66,7 @@ pub use pins::{PinSort, Pins};
 pub use playback::{Origin, Playback, PlaybackState, Repeat, Sleep, Unreachable, Whence};
 pub use profile::Profile;
 pub use queue::{Named, Queue, Resume, Stub};
+pub use ratings::Ratings;
 pub use remote::{Remote, attach as attach_remote};
 pub use requirements::{Requirement, Requirements};
 pub use scan::Scan;
@@ -73,7 +75,7 @@ pub use search::{AlbumHit, ArtistHit, Hit, Kind, PlaylistHit, Search};
 pub use session::{Failure, ProviderInfo, Session, SessionEvent, SessionState};
 pub use settings::{
     AppSettings, ConnectName, DiscordName, FilterValue, FullscreenControlsAutohide, LYRICS_SOURCES,
-    PlayerBarLayout, Reloaded, RomanizationScripts, SYSTEM_FONT, SideTab, ThemeFamily,
+    PlayerBarLayout, Reloaded, RomanizationScripts, SYSTEM_FONT, SideTab, StarRatings, ThemeFamily,
     ThemeVariant, equalizer_profile_label, remember_window, window_placement,
 };
 pub use signal::{Change, Equalizing, FLOAT_BITS, Following, Signal, SignalPath};
@@ -200,6 +202,7 @@ pub struct Sonora {
     /// that it keeps ticking.
     pub potoken: Entity<potoken::PoToken>,
     pub queue: Entity<Queue>,
+    pub ratings: Entity<Ratings>,
     pub requirements: Entity<Requirements>,
     pub scan: Entity<Scan>,
     pub scrobbling: Entity<Scrobbling>,
@@ -273,6 +276,7 @@ pub fn init(
             cx,
         )
     });
+    let ratings = cx.new(|cx| Ratings::new(session.clone(), settings.clone(), library.clone(), cx));
     let outputs = cx.new(|cx| Outputs::new(settings.clone(), playback.clone(), cx));
     let downloads = cx.new(|cx| {
         Downloads::new(
@@ -373,6 +377,7 @@ pub fn init(
         playback,
         potoken,
         queue,
+        ratings,
         requirements,
         scan,
         scrobbling,

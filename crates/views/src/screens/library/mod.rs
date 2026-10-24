@@ -255,7 +255,7 @@ impl LibraryView {
             .with_liked(library.clone())
             .starrable(shelf)
             .shelved(shelf)
-            .table(cx.weak_entity());
+            .table(cx);
             let mut delegate =
                 TableDelegate::new(source, width, cx).with_sort(TrackField::AddedAt, RECENT, cx);
             let (layout, sorting) = stored(Section::Songs, cx);

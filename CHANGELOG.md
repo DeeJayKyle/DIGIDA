@@ -7,6 +7,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- You can rate Spotify songs with stars from the player, the right-click menu and every song list once you turn on Star ratings in Settings. Ratings are retained when several songs were rated at the same time.
+
 ### Fixed
 
 - Playing YouTube Music videos and looking up lyrics no longer fills your YouTube search history

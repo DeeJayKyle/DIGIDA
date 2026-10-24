@@ -6,6 +6,7 @@ use i18n::t;
 use state::{Playback, Queue, Repeat, Sonora, Steered};
 use ui::{ActiveTheme as _, Button};
 
+pub(crate) use super::rating::rating;
 use crate::shared::ambient;
 
 pub(crate) const NOTCH: f32 = 0.05;
@@ -35,39 +36,6 @@ pub(crate) fn volume_icon(level: f32) -> &'static str {
 
 pub(crate) fn percent(fraction: f32) -> SharedString {
     t!("player-percent", value = (fraction * 100.).round())
-}
-
-/// The heart that saves or drops `track`. A click toggles the track `playback` holds by then,
-/// which is the one shown, so callers only lend the track to read its state.
-pub(crate) fn like(track: Option<&music::Track>, playback: &Entity<Playback>, cx: &App) -> Button {
-    let theme = *cx.theme();
-    let library = Sonora::global(cx).library.clone();
-    let playback = playback.clone();
-    let id = track.and_then(|track| track.id.as_deref());
-    let saved = id.is_some_and(|id| library.read(cx).saved(id));
-
-    Button::new("toggle-liked-track")
-        .ghost()
-        .backgroundless()
-        .small()
-        .icon(match saved {
-            true => "icons/heart-filled.svg",
-            false => "icons/heart.svg",
-        })
-        .tooltip_above(match saved {
-            true => "menu-remove-from-library",
-            false => "menu-add-to-library",
-        })
-        .tint(match saved {
-            true => theme.primary,
-            false => theme.muted_foreground,
-        })
-        .disabled(id.is_none())
-        .on_click(move |_, _, cx| {
-            if let Some(track) = playback.read(cx).track().cloned() {
-                library.update(cx, |library, cx| library.toggle(track, cx));
-            }
-        })
 }
 
 /// `big` is only true in fullscreen, where these buttons float over the ambient

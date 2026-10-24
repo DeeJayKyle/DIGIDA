@@ -361,7 +361,6 @@ pub(crate) fn title<F>(
     explicit: bool,
     press: Option<Tap>,
     status: Option<AnyElement>,
-    is_liked: Option<AnyElement>,
 ) -> AnyElement {
     let text = div()
         .id(("track-title", cell.row))
@@ -386,7 +385,6 @@ pub(crate) fn title<F>(
             this.child(div().flex_none().child(ExplicitBadge::new()))
         })
         .when_some(status, |this, status| this.child(status))
-        .when_some(is_liked, |this, is_liked| this.child(is_liked))
         .into_any_element()
 }
 
