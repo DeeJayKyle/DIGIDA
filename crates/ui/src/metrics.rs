@@ -1,11 +1,13 @@
 use gpui::{Pixels, SharedString, TextRun, Window, px};
 use i18n::t;
+use serde::{Deserialize, Serialize};
 
 const HEADER: f32 = 0.75;
 
 pub const LEADING: f32 = 1.25;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Rounding {
     Square,
     Subtle,
@@ -31,15 +33,6 @@ impl Rounding {
             Self::Subtle => t!("corners-subtle"),
             Self::Rounded => t!("corners-rounded"),
             Self::Round => t!("corners-round"),
-        }
-    }
-
-    pub fn from_id(id: &str) -> Self {
-        match id {
-            "square" => Self::Square,
-            "rounded" => Self::Rounded,
-            "round" => Self::Round,
-            _ => Self::Subtle,
         }
     }
 

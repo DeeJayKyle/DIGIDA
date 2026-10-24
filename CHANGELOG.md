@@ -7,8 +7,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Ambient brings artwork colours throughout the app and Now playing, with adjustable strength
+  and optional animation. Colours fade between songs, including playback on another device.
+
+### Changed
+
+- Choose System, Dark or Light appearance separately from your colour theme.
+
 ### Fixed
 
+- Player-bar layout previews now follow the selected corner shape.
 - Playing YouTube Music videos and looking up lyrics no longer fills your YouTube search history
   with song names. Only what you search for yourself shows up there.
 - The fullscreen visualizer keeps moving after a setting such as gapless playback restarts the

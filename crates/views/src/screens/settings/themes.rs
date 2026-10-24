@@ -4,11 +4,13 @@
 use gpui::prelude::*;
 use gpui::{
     AnyElement, Context, Div, Pixels, SharedString, div, linear_color_stop, linear_gradient, px,
-    svg,
+    relative, svg,
 };
 use i18n::t;
 use state::ThemeFamily;
-use ui::{ActiveTheme as _, Look, Menu, MenuItem, OptionCard, Picker, Rail, Theme, ThemeKind};
+use ui::{
+    ActiveTheme as _, Menu, MenuItem, OptionCard, Picker, Rail, Theme, ThemeKind, ThemeOverrides,
+};
 
 use super::SettingsView;
 
@@ -23,8 +25,6 @@ const WIDTH: f32 = 148.;
 const HEIGHT: f32 = 94.;
 /// How many variants of a family its card shows side by side at most.
 const SLICES: usize = 4;
-/// The popover key of the variant menu, which one card at a time owns.
-const VARIANTS: &str = "theme-variants";
 /// The side of a variant's swatch in the menu.
 const SWATCH: f32 = 14.;
 /// How large the open folder glyph draws on its card.
@@ -57,44 +57,70 @@ const PLAY: [f32; 4] = [50., 70., 6., 6.];
 
 /// One card of the rail: a built-in theme or a family of theme files.
 enum Entry {
-    Kind(ThemeKind),
+    Default,
+    Ambient,
     Family(ThemeFamily),
 }
 
 impl SettingsView {
-    /// The theme cards on one rail: System, Dark and Light, then every family of theme files,
-    /// then the card that opens the themes folder. While the adaptive theme is on only the
-    /// neutral themes can be chosen, since the tint is laid over those. A saved theme whose file
-    /// is gone keeps a card of its own, chosen and disabled, so the page says what became of it.
+    /// The light/dark policy is independent of the selected colour family.
+    pub(super) fn appearance_cards(
+        &self,
+        window: &gpui::Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let chosen = self.settings.read(cx).appearance_mode();
+        let radius = cx.theme().radius;
+        super::rows::grid(ThemeKind::ALL.len() as u16, window, cx)
+            .children(ThemeKind::ALL.map(|kind| {
+                let palettes = match kind {
+                    ThemeKind::System => vec![Theme::dark(), Theme::light()],
+                    _ => vec![Theme::for_kind(kind)],
+                };
+                OptionCard::new(kind.id())
+                    .thumb_height(THUMB)
+                    .thumb(sliced(&palettes, radius))
+                    .label(kind.label())
+                    .selected(chosen == kind)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.settings
+                            .update(cx, |settings, cx| settings.set_appearance_mode(kind, cx));
+                    }))
+            }))
+            .into_any_element()
+    }
+
     pub(super) fn theme_cards(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = *cx.theme();
-        let (selected, chosen_family, adaptive, families) = {
+        let (selected, chosen_family, families) = {
             let settings = self.settings.read(cx);
             (
                 settings.theme().to_owned(),
-                settings
-                    .theme_variant()
-                    .map(|(family, _)| family.id.clone()),
-                settings.adaptive_theme(),
+                settings.theme_family().map(|family| family.id.clone()),
                 settings.theme_families().to_vec(),
             )
         };
-        let built_in = ThemeKind::ALL.iter().any(|kind| kind.id() == selected);
 
-        let mut cards = ThemeKind::ALL
+        let mode = self.settings.read(cx).appearance_mode();
+        let mut cards = [Entry::Default, Entry::Ambient]
             .into_iter()
-            .map(Entry::Kind)
-            .chain(families.into_iter().map(Entry::Family))
+            .chain(
+                families
+                    .into_iter()
+                    .filter(|family| family.variants_for(mode).next().is_some())
+                    .map(Entry::Family),
+            )
             .map(|entry| {
                 let chosen = match &entry {
-                    Entry::Kind(kind) => kind.id() == selected,
+                    Entry::Default => selected == "default",
+                    Entry::Ambient => selected == "ambient",
                     Entry::Family(family) => chosen_family.as_ref() == Some(&family.id),
                 };
-                self.theme_card(entry, chosen, adaptive, cx)
+                self.theme_card(entry, chosen, cx)
             })
             .collect::<Vec<_>>();
 
-        if !built_in && chosen_family.is_none() {
+        if selected != "default" && selected != "ambient" && chosen_family.is_none() {
             cards.push(
                 OptionCard::new("unavailable-theme")
                     .w(CARD)
@@ -147,57 +173,73 @@ impl SettingsView {
 
     /// One card: its miniature and its name. A family of several variants names the variant a
     /// click picks after its own name, and that line opens the menu of all of them.
-    fn theme_card(
-        &self,
-        entry: Entry,
-        chosen: bool,
-        adaptive: bool,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let look = self.look(cx);
+    fn theme_card(&self, entry: Entry, chosen: bool, cx: &mut Context<Self>) -> AnyElement {
         let radius = cx.theme().radius;
 
         match entry {
-            Entry::Kind(kind) => {
-                let palettes = match kind {
-                    ThemeKind::System => vec![Theme::dark(), Theme::light()],
-                    kind => vec![Theme::for_kind(kind)],
+            Entry::Default | Entry::Ambient => {
+                let ambient = matches!(entry, Entry::Ambient);
+                let settings = self.settings.read(cx);
+                let kind = settings.resolved_appearance();
+                let mut palette = Theme::for_kind(kind);
+                let (id, label) = match ambient {
+                    true => ("ambient", t!("settings-ambient")),
+                    false => ("default", t!("settings-theme-default")),
                 };
-                OptionCard::new(kind.id())
+                if ambient {
+                    let sampled = self
+                        .previews
+                        .playing_or_picked(cx)
+                        .cover
+                        .as_deref()
+                        .and_then(|cover| ui::cover_palette(cover, cx))
+                        .unwrap_or_default();
+                    palette = Theme::for_look(
+                        ui::Look {
+                            ambient: true,
+                            ambient_strength: 1.,
+                            tint: Some(sampled.primary.unwrap_or(palette.selection)),
+                            tint_secondary: sampled.secondary,
+                            tint_background: sampled.background,
+                            ..settings.look()
+                        },
+                        &ThemeOverrides::default(),
+                    );
+                    palette.background = palette.ambient_palette.background;
+                }
+                OptionCard::new(id)
                     .w(CARD)
                     .thumb_height(THUMB)
-                    .thumb(sliced(&palettes, radius))
-                    .label(kind.label())
+                    .thumb(sliced(&[palette], radius))
+                    .label(label)
                     .selected(chosen)
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        let overrides = this.settings.update(cx, |settings, cx| {
-                            settings.set_theme(kind.id(), cx);
-                            settings.theme_overrides()
-                        });
-                        Theme::fade(Look { kind, ..look }, &overrides, cx);
-                        cx.notify();
+                        this.settings
+                            .update(cx, |settings, cx| settings.set_theme(id, cx));
                     }))
                     .into_any_element()
             }
             Entry::Family(family) => {
-                let palettes = family
-                    .variants
-                    .iter()
+                let mode = self.settings.read(cx).appearance_mode();
+                let variants = family.variants_for(mode);
+                let palettes = variants
+                    .clone()
                     .take(SLICES)
                     .map(|variant| variant.palette())
                     .collect::<Vec<_>>();
-                let several = family.variants.len() > 1;
+                let several = variants.count() > 1;
                 // the variant on show while the family is chosen, else the one a click would pick
                 let settings = self.settings.read(cx);
                 let picked = match chosen {
                     true => settings.theme_variant().map(|(_, variant)| variant),
-                    false => settings.family_variant(&family.id, cx),
+                    false => settings.family_variant(&family.id),
                 }
-                .filter(|_| several)
-                .map(|variant| (variant.id.clone(), variant.name.clone()));
+                .map(|variant| variant.name.clone());
                 let label = match &picked {
-                    Some((_, name)) => format!("{} {name}", family.name),
-                    None => family.name.clone(),
+                    Some(name) if family.variants.len() > 1 => {
+                        format!("{} {name}", family.name)
+                    }
+                    _ => family.name.clone(),
                 };
                 let id = family.id.clone();
 
@@ -208,82 +250,90 @@ impl SettingsView {
                         .thumb(sliced(&palettes, radius))
                         .label(label)
                         .selected(chosen)
-                        .disabled(adaptive)
-                        .when(adaptive, |card| card.tooltip("settings-theme-unavailable"))
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            let overrides = this.settings.update(cx, |settings, cx| {
+                            this.settings.update(cx, |settings, cx| {
                                 settings.set_theme_family(&id, cx);
-                                settings.theme_overrides()
                             });
-                            Theme::fade(
-                                Look {
-                                    kind: ThemeKind::Dark,
-                                    ..look
-                                },
-                                &overrides,
-                                cx,
-                            );
                             cx.notify();
                         }));
-                match picked {
-                    Some((picked, _)) => self.with_variants(card, &family, &picked, cx),
-                    None => card,
+                if mode == ThemeKind::System {
+                    let controls = div().flex().flex_col().items_center().gap_1().children(
+                        [ThemeKind::Light, ThemeKind::Dark]
+                            .into_iter()
+                            .filter_map(|kind| self.card_variant_picker(&family, kind, cx)),
+                    );
+                    return card.controls(controls).into_any_element();
                 }
+                card.when(several && picked.is_some(), |card| {
+                    let kind = self.settings.read(cx).resolved_appearance();
+                    let key = SharedString::from(format!("theme-variants:{}", family.id));
+                    let menu = Menu::new("theme-variants-menu")
+                        .w(Picker::NARROW)
+                        .when(self.popovers.shows(&key), |menu| {
+                            menu.items(self.variant_items(&family, kind, cx))
+                        });
+                    card.variant_menu(key, &self.popovers, menu)
+                })
                 .into_any_element()
             }
         }
     }
 
-    /// Gives a family's card the menu of its variants, `picked` checked, opened from its name.
-    /// Only the family whose menu opened last owns the popover, so the name on any other card
-    /// hands it to its own.
-    fn with_variants(
+    /// Every System theme card exposes independent light and dark choices before selection.
+    fn card_variant_picker(
         &self,
-        card: OptionCard,
         family: &ThemeFamily,
-        picked: &str,
+        kind: ThemeKind,
         cx: &mut Context<Self>,
-    ) -> OptionCard {
-        if self.theme_variants.as_deref() != Some(family.id.as_str()) {
-            let id = family.id.clone();
-            return card.on_variants(cx.listener(move |this, _, _, cx| {
-                this.theme_variants = Some(id.clone());
-                this.popovers.open(VARIANTS);
-                cx.notify();
-            }));
-        }
+    ) -> Option<AnyElement> {
+        let chosen = self.settings.read(cx).variant_for(&family.id, kind)?;
+        let key = SharedString::from(format!("theme-variant:{}:{}", family.id, kind.id()));
+        let label = t!(
+            "settings-theme-variant-mode",
+            mode = kind.label().to_string(),
+            name = chosen.name.clone()
+        );
+        let open = self.popovers.shows(&key);
+        Some(
+            Picker::new(key, &self.popovers, label)
+                .when(open, |picker| {
+                    picker.items(self.variant_items(family, kind, cx))
+                })
+                .into_any_element(),
+        )
+    }
 
-        let look = self.look(cx);
-        let items = family.variants.iter().map(|variant| {
-            let id = variant.id.clone();
-            MenuItem::new(
-                SharedString::from(format!("theme-variant:{}", variant.id)),
-                variant.name.clone(),
-            )
-            .leading(swatch(&variant.palette()))
-            .checked(picked == variant.id)
-            .on_click(cx.listener(move |this, _, _, cx| {
-                let overrides = this.settings.update(cx, |settings, cx| {
-                    settings.set_theme(id.clone(), cx);
-                    settings.theme_overrides()
-                });
-                Theme::fade(
-                    Look {
-                        kind: ThemeKind::Dark,
-                        ..look
-                    },
-                    &overrides,
-                    cx,
-                );
-                this.popovers.close();
-                cx.notify();
-            }))
-        });
-        let menu = Menu::new("theme-variants-menu")
-            .w(Picker::NARROW)
-            .items(items);
-
-        card.variant_menu(VARIANTS, &self.popovers, menu)
+    /// Shares variant selection and remembered-mode handling between both card dropdown layouts.
+    fn variant_items(
+        &self,
+        family: &ThemeFamily,
+        kind: ThemeKind,
+        cx: &mut Context<Self>,
+    ) -> Vec<MenuItem> {
+        let chosen = self
+            .settings
+            .read(cx)
+            .variant_for(&family.id, kind)
+            .map(|variant| variant.id.clone());
+        family
+            .variants_for(kind)
+            .map(|variant| {
+                let id = variant.id.clone();
+                let family_id = family.id.clone();
+                MenuItem::new(
+                    SharedString::from(format!("theme-variant:{}", variant.id)),
+                    variant.name.clone(),
+                )
+                .leading(swatch(&variant.palette()))
+                .checked(chosen.as_deref() == Some(variant.id.as_str()))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.settings.update(cx, |settings, cx| {
+                        settings.set_theme_variant(&family_id, &id, cx)
+                    });
+                    this.popovers.close();
+                }))
+            })
+            .collect()
     }
 }
 
@@ -323,7 +373,11 @@ fn sliced(palettes: &[Theme], radius: Pixels) -> Div {
                 };
                 rect([left, 0., right - left, HEIGHT])
                     .overflow_hidden()
-                    .child(miniature(palette, outer, mark).left(px(-left)))
+                    .child(
+                        miniature(palette, outer, mark)
+                            .w(relative(WIDTH / (right - left)))
+                            .left(relative(-left / (right - left))),
+                    )
             }),
     )
 }
@@ -346,10 +400,16 @@ fn miniature(palette: &Theme, outer: Pixels, mark: Pixels) -> Div {
     div()
         .absolute()
         .top_0()
-        .w(px(WIDTH))
-        .h(px(HEIGHT))
+        .size_full()
         .rounded(outer)
         .bg(palette.background)
+        .when_some(palette.tint_background, |this, color| {
+            this.bg(linear_gradient(
+                135.,
+                linear_color_stop(color, 0.),
+                linear_color_stop(palette.background, 1.),
+            ))
+        })
         .child(rect([0., 0., SIDEBAR, HEIGHT]).rounded_l(outer).bg(panel))
         .children(ENTRIES.into_iter().enumerate().map(|(index, entry)| {
             bar(
@@ -388,12 +448,12 @@ fn swatch(palette: &Theme) -> Div {
         ))
 }
 
-/// A box in the miniature from its left, top, width and height in pixels.
+/// A proportional box expressed in the miniature’s reference coordinates.
 fn rect([x, y, width, height]: [f32; 4]) -> Div {
     div()
         .absolute()
-        .left(px(x))
-        .top(px(y))
-        .w(px(width))
-        .h(px(height))
+        .left(relative(x / WIDTH))
+        .top(relative(y / HEIGHT))
+        .w(relative(width / WIDTH))
+        .h(relative(height / HEIGHT))
 }

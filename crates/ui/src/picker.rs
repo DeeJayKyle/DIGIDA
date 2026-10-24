@@ -16,7 +16,7 @@ enum Face {
 #[derive(IntoElement)]
 pub struct Picker {
     style: StyleRefinement,
-    key: &'static str,
+    key: SharedString,
     group: Popovers,
     face: Face,
     /// A small element drawn before the current choice on the trigger.
@@ -42,10 +42,14 @@ impl Picker {
     pub const REGULAR: Pixels = px(190.);
     pub const WIDE: Pixels = px(260.);
 
-    pub fn new(key: &'static str, group: &Popovers, current: impl Into<SharedString>) -> Self {
+    pub fn new(
+        key: impl Into<SharedString>,
+        group: &Popovers,
+        current: impl Into<SharedString>,
+    ) -> Self {
         Self {
             style: StyleRefinement::default(),
-            key,
+            key: key.into(),
             group: group.clone(),
             face: Face::Label(current.into()),
             leading: None,
@@ -65,7 +69,7 @@ impl Picker {
         }
     }
 
-    pub fn icon(key: &'static str, group: &Popovers, icon: &'static str) -> Self {
+    pub fn icon(key: impl Into<SharedString>, group: &Popovers, icon: &'static str) -> Self {
         Self {
             face: Face::Icon(icon),
             ..Self::new(key, group, "")
@@ -74,7 +78,11 @@ impl Picker {
 
     /// A labelled trigger without the chevron, for a popover that holds a control rather than a
     /// list of choices.
-    pub fn plain(key: &'static str, group: &Popovers, label: impl Into<SharedString>) -> Self {
+    pub fn plain(
+        key: impl Into<SharedString>,
+        group: &Popovers,
+        label: impl Into<SharedString>,
+    ) -> Self {
         Self {
             face: Face::Plain(label.into()),
             ..Self::new(key, group, "")

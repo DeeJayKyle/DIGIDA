@@ -27,7 +27,7 @@ pub(in crate::screens::settings) fn preview(
     let sample = view.previews.playing_or_picked(cx);
     let cover = sample.large_cover(cx);
     let settings = view.settings.read(cx);
-    let ambient = settings.ambient();
+    let ambient = settings.ambient_theme();
 
     let field = ambient.then(|| view.previews.ambient(cover.clone(), cx));
     let side = (height * COVER).round();

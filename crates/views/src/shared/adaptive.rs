@@ -1,6 +1,6 @@
 use gpui::{App, Context, Entity, Task};
 use state::{AppSettings, Playback, Queue, Reloaded, Sonora};
-use ui::{ActiveTheme as _, CoverPalette, Look, Theme, ThemeKind};
+use ui::{CoverPalette, Look, Theme, ThemeOverrides};
 
 /// Drives the theme's tint from the playing track's cover, and keeps the next
 /// track's cover sampled ahead of time so a track change recolours on the frame
@@ -9,16 +9,12 @@ pub struct Adaptive {
     playback: Entity<Playback>,
     queue: Entity<Queue>,
     settings: Entity<AppSettings>,
-    /// Whether the fullscreen shell is up. The ambient background is painted
-    /// out of the tint, so fullscreen samples the cover whatever the adaptive
-    /// theme setting says.
-    fullscreen: bool,
     cover: Option<String>,
     /// The palette the theme is wearing, so a change that is not a track change can be put
     /// back on without sampling the cover again.
     painted: CoverPalette,
-    /// The kind last applied from here, since the theme itself does not carry one.
-    worn: Option<ThemeKind>,
+    /// The requested palette, kept so unrelated settings do not restart a running fade.
+    applied: Option<(Look, ThemeOverrides)>,
     ahead: Option<Ahead>,
     task: Option<Task<()>>,
 }
@@ -36,14 +32,28 @@ impl Adaptive {
     pub fn new(playback: Entity<Playback>, cx: &mut Context<Self>) -> Self {
         let sonora = Sonora::global(cx);
         let (queue, settings) = (sonora.queue.clone(), sonora.settings.clone());
+        let devices = sonora.devices.clone();
         cx.observe(&playback, |this, _, cx| this.sync(false, cx))
             .detach();
-        cx.observe(&settings, |this, _, cx| this.sync(false, cx))
-            .detach();
+        cx.observe(&settings, |this, _, cx| {
+            let settings = this.settings.read(cx);
+            let sliding = this.applied.as_ref().is_some_and(|(look, _)| {
+                look.kind == settings.look().kind
+                    && look.ambient == settings.ambient_theme()
+                    && look.ambient_strength != settings.ambient_strength()
+            });
+            this.sync(sliding, cx);
+        })
+        .detach();
+        cx.observe(&devices, |this, _, cx| {
+            this.sync(false, cx);
+            this.look_ahead(cx);
+        })
+        .detach();
         // A reload can change what the theme is built from without changing its kind or tint,
         // so forget what was worn and paint it again.
         cx.subscribe(&settings, |this, _, _: &Reloaded, cx| {
-            this.worn = None;
+            this.applied = None;
             this.sync(false, cx);
         })
         .detach();
@@ -54,27 +64,14 @@ impl Adaptive {
             playback,
             queue,
             settings,
-            fullscreen: false,
             cover: None,
             painted: CoverPalette::default(),
-            worn: None,
+            applied: None,
             ahead: None,
             task: None,
         };
         adaptive.sync(false, cx);
         adaptive
-    }
-
-    /// Records whether fullscreen is up and resamples. Leaving fullscreen with the adaptive
-    /// theme off drops the tint here, so the rest of the app never keeps a cover's colour.
-    /// The swap is instant either way: the whole palette appears or disappears at once, and
-    /// washing the workspace through that on the way out is a change nobody asked for.
-    pub fn set_fullscreen(&mut self, fullscreen: bool, cx: &mut Context<Self>) {
-        if self.fullscreen == fullscreen {
-            return;
-        }
-        self.fullscreen = fullscreen;
-        self.sync(true, cx);
     }
 
     /// Resamples the cover and hands the palette to the theme. `instant` skips the fade, for
@@ -83,18 +80,17 @@ impl Adaptive {
         let cover = self
             .settings
             .read(cx)
-            .cover_tint(self.fullscreen)
+            .ambient_theme()
             .then(|| {
                 self.playback
                     .read(cx)
-                    .track()
-                    .and_then(|track| track.cover.clone())
+                    .shown_track(cx)
+                    .and_then(|track| track.cover)
             })
             .flatten();
 
         if cover == self.cover {
-            // The kind can still have changed under the same cover, which is what entering
-            // and leaving fullscreen does.
+            // A settings change can alter the theme without changing the sampled cover.
             self.apply(self.painted, instant, cx);
             return;
         }
@@ -109,7 +105,11 @@ impl Adaptive {
 
         // The track we sampled ahead is usually the one that just started, so
         // the recolour lands without a round trip.
-        match self.ready(&cover) {
+        let ready = self
+            .ahead
+            .take_if(|ahead| ahead.cover == cover && ahead.palette.is_some())
+            .and_then(|ahead| ahead.palette);
+        match ready {
             Some(palette) => {
                 self.task = None;
                 self.apply(palette, instant, cx);
@@ -126,71 +126,50 @@ impl Adaptive {
         self.look_ahead(cx);
     }
 
-    /// The theme to wear. Fullscreen with the ambient background on always wears a dark one:
-    /// the field behind the lyrics is dark whatever the cover gave it, and a light theme's
-    /// text would be lost on it. Every other theme is already dark, so only Light is swapped.
-    fn kind(&self, cx: &App) -> ThemeKind {
-        let settings = self.settings.read(cx);
-        let kind = settings.look().kind;
-        let darken = self.fullscreen && settings.ambient() && kind.resolved(cx) == ThemeKind::Light;
-
-        match darken {
-            true => ThemeKind::Dark,
-            false => kind,
-        }
-    }
-
     /// Puts the palette and the kind on the theme, as a fade or as a swap on the spot.
     fn apply(&mut self, palette: CoverPalette, instant: bool, cx: &mut App) {
-        let kind = self.kind(cx);
-        let theme = *cx.theme();
-        if self.worn == Some(kind)
-            && theme.tint == palette.primary
-            && theme.tint_secondary == palette.secondary
-        {
-            return;
-        }
-        self.worn = Some(kind);
         self.painted = palette;
-
-        let settings = Sonora::global(cx).settings.clone();
         let (look, overrides) = {
-            let settings = settings.read(cx);
+            let settings = self.settings.read(cx);
             (
                 Look {
-                    kind,
                     tint: palette.primary,
                     tint_secondary: palette.secondary,
+                    tint_background: palette.background,
                     ..settings.look()
                 },
                 settings.theme_overrides(),
             )
         };
 
+        if self
+            .applied
+            .as_ref()
+            .is_some_and(|(last, colors)| *last == look && *colors == overrides)
+        {
+            return;
+        }
+        self.applied = Some((look, overrides.clone()));
         match instant {
             true => Theme::set(look, &overrides, cx),
             false => Theme::fade(look, &overrides, cx),
         }
     }
 
-    /// The palette sampled ahead for `cover`, taken out of the slot so the next
-    /// track can claim it.
-    fn ready(&mut self, cover: &str) -> Option<CoverPalette> {
-        let palette = self
-            .ahead
-            .as_ref()
-            .filter(|ahead| ahead.cover == cover)?
-            .palette?;
-        self.ahead = None;
-        Some(palette)
-    }
-
     /// Samples the cover of the track queued next, so its palette is waiting
     /// when it starts. A shuffle or a jump elsewhere in the library simply
     /// misses and falls back to sampling on the change.
     fn look_ahead(&mut self, cx: &mut Context<Self>) {
-        let next = match self.settings.read(cx).cover_tint(self.fullscreen) {
-            true => {
+        if !self.settings.read(cx).ambient_theme() {
+            self.ahead = None;
+            return;
+        }
+        let next = match self.playback.read(cx).steered(cx) {
+            Some(remote) => remote
+                .upcoming
+                .first()
+                .and_then(|upcoming| upcoming.track.cover.clone()),
+            None => {
                 let queue = self.queue.read(cx);
                 queue
                     .upcoming()
@@ -198,9 +177,7 @@ impl Adaptive {
                     .or_else(|| queue.similar().next())
                     .and_then(|track| track.cover.clone())
             }
-            false => None,
         };
-
         let Some(cover) = next else {
             self.ahead = None;
             return;

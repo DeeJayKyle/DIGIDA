@@ -45,6 +45,16 @@ pub(crate) fn window_radius(settings: &AppSettings, cx: &App, window: &Window) -
     }
 }
 
+/// Both sidebars use the page palette and reveal the same ambient field or window backdrop.
+fn sidebar_surface<E: Styled>(element: E, cx: &App) -> E {
+    let theme = cx.theme();
+    let element = element.border_color(theme.border);
+    match !theme.transparent && !theme.ambient {
+        true => element.bg(theme.background),
+        false => element,
+    }
+}
+
 pub(crate) fn section_label(key: &'static str, cx: &App) -> Div {
     div()
         .flex()

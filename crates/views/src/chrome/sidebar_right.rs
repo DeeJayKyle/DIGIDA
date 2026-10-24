@@ -1,7 +1,7 @@
 use gpui::prelude::*;
 use gpui::{Context, Entity, Pixels, Render, StyleRefinement, Window, div, px};
 use state::{AppSettings, Playback, Queue, SideTab, Sonora};
-use ui::{ActiveTheme as _, MIN_CONTENT, Panel, Room, Side};
+use ui::{MIN_CONTENT, Panel, Room, Side};
 
 use crate::chrome::Aside;
 
@@ -120,8 +120,6 @@ impl Render for SidebarRight {
             return div().into_any_element();
         }
 
-        let theme = *cx.theme();
-
         Panel::new("sidebar-right", Side::Right, self.width)
             .limits(MIN_WIDTH, MAX_WIDTH)
             .reach(super::cap(MIN_WIDTH, MAX_WIDTH, MIN_CONTENT, window))
@@ -131,8 +129,7 @@ impl Render for SidebarRight {
                 this.persist(cx);
                 cx.notify();
             }))
-            .when(!theme.transparent, |this| this.bg(theme.background))
-            .border_color(theme.border)
+            .map(|panel| super::sidebar_surface(panel, cx))
             .child(
                 self.aside
                     .clone()

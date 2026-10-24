@@ -1281,7 +1281,8 @@ impl<S: TableSource> Render for TableState<S> {
         // the rest. An opaque window keeps the page painted under it, which is what the
         // head's own alpha has always been mixed against.
         let frosted = blurring(cx);
-        let backdrop = (!frosted && !cx.theme().transparent).then(|| cx.theme().background);
+        let backdrop = (!frosted && !cx.theme().transparent && !cx.theme().ambient)
+            .then(|| cx.theme().background);
         let masked = match frosted {
             true => pinned,
             false => pinned + head,

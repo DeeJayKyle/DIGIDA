@@ -179,6 +179,7 @@ fn change_font_size(
             Look {
                 tint,
                 tint_secondary,
+                tint_background: cx.theme().tint_background,
                 ..settings.look()
             },
             settings.theme_overrides(),

@@ -69,7 +69,7 @@ const DECODERS: usize = 2;
 /// is all it takes for anything still on screen to ask for its cover again, and that
 /// redraw is already on its way when the batch is condemned.
 const REPRIEVE: Duration = Duration::from_millis(250);
-/// How many cover palettes are kept. Each one is two colours, so the map costs
+/// How many cover palettes are kept. Each one is a compact colour palette, so the map costs
 /// nothing beside the frames, and holding them past an eviction is what keeps a
 /// button its colour while its cover is decoded again.
 const TINT_ITEMS: usize = 4096;

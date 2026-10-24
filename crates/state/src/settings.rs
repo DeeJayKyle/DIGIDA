@@ -148,15 +148,6 @@ impl FullscreenControlsAutohide {
         }
     }
 
-    pub fn from_id(id: &str) -> Self {
-        match id {
-            "automatic" => Self::Automatic,
-            "always-hidden" => Self::AlwaysHidden,
-            "always-shown" => Self::AlwaysShown,
-            _ => Self::Automatic,
-        }
-    }
-
     pub fn key(self) -> &'static str {
         match self {
             Self::Automatic => "settings-fullscreen-controls-autohide-automatic",
@@ -433,7 +424,8 @@ struct Values {
 }
 
 /// The arrangement of the workspace's player bar, independent of its surface material.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum PlayerBarLayout {
     #[default]
     Classic,
@@ -460,36 +452,24 @@ impl PlayerBarLayout {
             Self::Compact => "settings-player-bar-compact",
         }
     }
-
-    /// Reads a saved layout id, keeping the original bar for missing or unknown choices.
-    pub fn from_id(id: &str) -> Self {
-        match id {
-            "centered" => Self::Centered,
-            "compact" => Self::Compact,
-            _ => Self::Classic,
-        }
-    }
 }
 
-/// The `appearance` block of `settings.json`. Fixed choices are stored by id, removed variant
-/// falls back to the default instead of failing the parse.
+/// The `appearance` block of `settings.json`, with typed fixed choices and dynamic theme IDs.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 struct Appearance {
     theme: String,
-    adaptive_theme: bool,
-    ambient: bool,
+    appearance_mode: ThemeKind,
+    ambient_intensity: f32,
     ambient_motion: bool,
-    visualizer: bool,
-    visualizer_style: String,
+    visualizer_style: ui::VisualizerStyle,
     /// Whether the visualizer draws the track at its own level rather than at the volume.
     visualizer_absolute: bool,
-    player_bar_layout: String,
+    player_bar_layout: PlayerBarLayout,
     player_bar_transparent: bool,
     icons: String,
-    rounding: String,
-    /// Whether the app paints its frosted treatments. The key kept its old name, which stood
-    /// for a blurred desktop behind the window, so a stored preference carries over.
+    rounding: Rounding,
+    /// Whether the app paints its frosted treatments.
     blur: bool,
     /// Whether a see-through window asks the platform to blur the desktop behind it.
     blur_window: bool,
@@ -508,16 +488,15 @@ struct Appearance {
         target_os = "freebsd",
         target_os = "macos"
     ))]
-    window_rounding: String,
+    window_rounding: Rounding,
     window_controls: bool,
     #[cfg(not(target_os = "macos"))]
     traffic_light_controls: bool,
     controls_on_left: bool,
-    reduce_motion: String,
-    motion_pace: String,
-    battery_saver: String,
-    theme_overrides: ThemeOverrides,
-    fullscreen_controls_autohide: String,
+    reduce_motion: Stillness,
+    motion_pace: Pace,
+    battery_saver: Saver,
+    fullscreen_controls_autohide: FullscreenControlsAutohide,
     os_fullscreen: bool,
 }
 
@@ -668,7 +647,7 @@ struct StateValues {
     sidebar_pin_reversed: bool,
     resume: Option<Resume>,
     window: Option<Frame>,
-    system_theme: String,
+    system_theme: ThemeKind,
     /// The variant last chosen in each theme family, by family id.
     theme_variants: HashMap<String, String>,
 }
@@ -698,7 +677,7 @@ impl Default for StateValues {
             sidebar_pin_reversed: false,
             resume: None,
             window: None,
-            system_theme: ThemeKind::Dark.id().to_owned(),
+            system_theme: ThemeKind::Dark,
             theme_variants: HashMap::new(),
         }
     }
@@ -769,17 +748,16 @@ impl StateStore {
 impl Default for Appearance {
     fn default() -> Self {
         Self {
-            theme: "dark".to_owned(),
-            adaptive_theme: false,
-            ambient: true,
+            theme: "default".to_owned(),
+            appearance_mode: ThemeKind::Dark,
+            ambient_intensity: 0.75,
             ambient_motion: true,
-            visualizer: true,
-            visualizer_style: ui::VisualizerStyle::default().id().to_owned(),
+            visualizer_style: ui::VisualizerStyle::default(),
             visualizer_absolute: false,
-            player_bar_layout: PlayerBarLayout::default().id().to_owned(),
+            player_bar_layout: PlayerBarLayout::default(),
             player_bar_transparent: true,
             icons: icons::BASE.to_owned(),
-            rounding: Rounding::Rounded.id().to_owned(),
+            rounding: Rounding::Rounded,
             blur: true,
             blur_window: true,
             font_size: DEFAULT_FONT_SIZE,
@@ -788,20 +766,19 @@ impl Default for Appearance {
             #[cfg(any(target_os = "linux", target_os = "freebsd"))]
             server_side_decorations: true,
             #[cfg(target_os = "windows")]
-            window_rounding: Rounding::Rounded.id().to_owned(),
+            window_rounding: Rounding::Rounded,
             #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-            window_rounding: Rounding::Square.id().to_owned(),
+            window_rounding: Rounding::Square,
             #[cfg(target_os = "macos")]
-            window_rounding: Rounding::Subtle.id().to_owned(),
+            window_rounding: Rounding::Subtle,
             window_controls: true,
             #[cfg(not(target_os = "macos"))]
             traffic_light_controls: false,
             controls_on_left: false,
-            reduce_motion: Stillness::default().id().to_owned(),
-            motion_pace: Pace::default().id().to_owned(),
-            battery_saver: Saver::default().id().to_owned(),
-            theme_overrides: ThemeOverrides::default(),
-            fullscreen_controls_autohide: FullscreenControlsAutohide::Automatic.id().to_owned(),
+            reduce_motion: Stillness::default(),
+            motion_pace: Pace::default(),
+            battery_saver: Saver::default(),
+            fullscreen_controls_autohide: FullscreenControlsAutohide::Automatic,
             os_fullscreen: false,
         }
     }
@@ -1213,41 +1190,102 @@ impl AppSettings {
         &self.families
     }
 
-    /// The family and variant of the selected theme, or `None` while a built-in theme is
-    /// selected or the selected file is gone.
+    /// The light/dark policy, independent of the selected colour theme.
+    pub fn appearance_mode(&self) -> ThemeKind {
+        self.values.appearance.appearance_mode
+    }
+
+    /// The selected colour family, if it is still installed.
+    pub fn theme_family(&self) -> Option<&ThemeFamily> {
+        self.families
+            .iter()
+            .find(|family| family.id == self.theme())
+    }
+
+    /// The currently resolved polarity, including the last reported system appearance.
+    pub fn resolved_appearance(&self) -> ThemeKind {
+        let mode = self.appearance_mode();
+        if mode != ThemeKind::System {
+            return mode;
+        }
+        let system = self.system_theme();
+        let family = self.theme_family();
+        let Some(family) = family else {
+            return system;
+        };
+        if family.variants_for(system).next().is_some() {
+            return system;
+        }
+        match family.variants.first().is_some_and(ThemeVariant::is_light) {
+            true => ThemeKind::Light,
+            false => ThemeKind::Dark,
+        }
+    }
+
+    /// The selected family and its variant for the current light/dark appearance.
     pub fn theme_variant(&self) -> Option<(&ThemeFamily, &ThemeVariant)> {
-        self.families.iter().find_map(|family| {
-            family
-                .variant(self.theme())
-                .map(|variant| (family, variant))
+        let family = self.theme_family()?;
+        self.variant_for(&family.id, self.resolved_appearance())
+            .map(|variant| (family, variant))
+    }
+
+    /// The remembered variant for one polarity, falling back only within that polarity.
+    pub fn variant_for(&self, family: &str, kind: ThemeKind) -> Option<&ThemeVariant> {
+        let family = self.families.iter().find(|found| found.id == family)?;
+        let light = kind == ThemeKind::Light;
+        let key = format!("{}:{}", family.id, kind.id());
+        self.state
+            .theme_variants
+            .get(&key)
+            .map(String::as_str)
+            .and_then(|id| family.variant(id))
+            .filter(|variant| variant.is_light() == light)
+            .or_else(|| family.variants_for(kind).next())
+    }
+
+    /// The variant choosing this family would use in the current appearance.
+    pub fn family_variant(&self, family: &str) -> Option<&ThemeVariant> {
+        let mode = match self.appearance_mode() {
+            ThemeKind::System => self.system_theme(),
+            mode => mode,
+        };
+        self.variant_for(family, mode).or_else(|| {
+            let family = self.families.iter().find(|found| found.id == family)?;
+            let kind = match family.variants.first()?.is_light() {
+                true => ThemeKind::Light,
+                false => ThemeKind::Dark,
+            };
+            self.variant_for(&family.id, kind)
         })
     }
 
-    /// The variant choosing `family` would select: the one last chosen in it, else the first
-    /// whose lightness matches the system appearance, else the first.
-    pub fn family_variant(&self, family: &str, cx: &App) -> Option<&ThemeVariant> {
-        let family = self.families.iter().find(|found| found.id == family)?;
-        let light = ThemeKind::System.resolved(cx) == ThemeKind::Light;
-        self.state
-            .theme_variants
-            .get(&family.id)
-            .and_then(|id| family.variant(id))
-            .or_else(|| {
-                family
-                    .variants
-                    .iter()
-                    .find(|variant| variant.is_light() == light)
-            })
-            .or(family.variants.first())
+    /// Ambient is a standalone treatment of the default palette, never an overlay on a theme file.
+    pub fn ambient_strength(&self) -> f32 {
+        match self.theme() == "ambient" {
+            true => {
+                let floor = match self.resolved_appearance() {
+                    ThemeKind::Light => 0.05,
+                    _ => 0.25,
+                };
+                floor + self.ambient_intensity() * (1. - floor)
+            }
+            false => 0.,
+        }
     }
 
-    pub fn adaptive_theme(&self) -> bool {
-        self.values.appearance.adaptive_theme
+    /// How strongly artwork colours replace the neutral default palette.
+    pub fn ambient_intensity(&self) -> f32 {
+        self.values.appearance.ambient_intensity.clamp(0., 1.)
     }
 
-    /// The arrangement of the workspace's playback controls. Unknown saved ids use Classic.
+    /// Whether artwork colours fill the whole app behind translucent surfaces.
+    pub fn ambient_theme(&self) -> bool {
+        self.theme() == "ambient"
+    }
+
+    /// The arrangement of the workspace's playback controls.
     pub fn player_bar_layout(&self) -> PlayerBarLayout {
-        PlayerBarLayout::from_id(&self.values.appearance.player_bar_layout)
+        self.values.appearance.player_bar_layout
     }
 
     /// Whether the listener asked for a see-through player bar. What the bar does is
@@ -1262,31 +1300,15 @@ impl AppSettings {
         self.player_bar_transparent() && self.blur()
     }
 
-    /// Whether fullscreen paints the ambient background sampled from the cover.
-    pub fn ambient(&self) -> bool {
-        self.values.appearance.ambient
-    }
-
     /// Whether the ambient background drifts. Off leaves it a still gradient, which is what
     /// the system reduce-motion preference does too.
     pub fn ambient_motion(&self) -> bool {
         self.values.appearance.ambient_motion
     }
 
-    /// Whether the playing cover should colour the theme, given whether fullscreen is up. The
-    /// ambient background is painted out of the tint, so fullscreen tints whatever the adaptive
-    /// theme setting says.
-    pub fn cover_tint(&self, fullscreen: bool) -> bool {
-        self.adaptive_theme() || (fullscreen && self.ambient())
-    }
-
-    /// The visualizer's style, `None` when it is off. The old `visualizer` switch is still the
-    /// off state, so a settings file written before the two were one setting keeps its answer.
+    /// The visualizer's style, including `None` when it is off.
     pub fn visualizer_style(&self) -> ui::VisualizerStyle {
-        match self.values.appearance.visualizer {
-            true => ui::VisualizerStyle::from_id(&self.values.appearance.visualizer_style),
-            false => ui::VisualizerStyle::None,
-        }
+        self.values.appearance.visualizer_style
     }
 
     /// Whether the visualizer ignores Sonora's volume and draws the track at its own level.
@@ -1295,15 +1317,15 @@ impl AppSettings {
     }
 
     pub fn fullscreen_controls_autohide(&self) -> FullscreenControlsAutohide {
-        FullscreenControlsAutohide::from_id(&self.values.appearance.fullscreen_controls_autohide)
+        self.values.appearance.fullscreen_controls_autohide
     }
 
     pub fn icons(&self) -> &str {
         &self.values.appearance.icons
     }
 
-    pub fn rounding(&self) -> &str {
-        &self.values.appearance.rounding
+    pub fn rounding(&self) -> Rounding {
+        self.values.appearance.rounding
     }
 
     /// Whether the app paints its frosted treatments. See `ui::blurring`.
@@ -1321,32 +1343,35 @@ impl AppSettings {
     }
 
     pub fn stillness(&self) -> Stillness {
-        Stillness::from_id(&self.values.appearance.reduce_motion)
+        self.values.appearance.reduce_motion
     }
 
     pub fn pace(&self) -> Pace {
-        Pace::from_id(&self.values.appearance.motion_pace)
+        self.values.appearance.motion_pace
     }
 
     pub fn saver(&self) -> Saver {
-        Saver::from_id(&self.values.appearance.battery_saver)
+        self.values.appearance.battery_saver
     }
 
     pub fn system_theme(&self) -> ThemeKind {
-        ThemeKind::from_id(&self.state.system_theme)
+        self.state.system_theme
     }
 
     pub fn look(&self) -> Look {
         Look {
-            kind: ThemeKind::from_id(self.theme()),
-            rounding: Rounding::from_id(self.rounding()),
+            kind: self.resolved_appearance(),
+            rounding: self.rounding(),
             font: self.font_size(),
             transparent: self.transparent(),
             transparency: self.transparency(),
             blur: self.blur(),
             blur_window: self.blur_window(),
+            ambient: self.ambient_theme(),
+            ambient_strength: self.ambient_strength(),
             tint: None,
             tint_secondary: None,
+            tint_background: None,
         }
     }
 
@@ -1370,7 +1395,7 @@ impl AppSettings {
         target_os = "macos"
     ))]
     pub fn window_rounding(&self) -> Rounding {
-        Rounding::from_id(&self.values.appearance.window_rounding)
+        self.values.appearance.window_rounding
     }
 
     pub fn window_controls(&self) -> bool {
@@ -1404,12 +1429,11 @@ impl AppSettings {
             .clamp(0., ui::MAX_TRANSPARENCY)
     }
 
-    /// Combines the selected theme file with legacy overrides from `settings.json`.
+    /// The selected theme file's colours, or the built-in palette when no family is selected.
     pub fn theme_overrides(&self) -> ThemeOverrides {
-        let inline = &self.values.appearance.theme_overrides;
         self.theme_variant()
-            .map(|(_, variant)| variant.overrides.clone().merged(inline))
-            .unwrap_or_else(|| inline.clone())
+            .map(|(_, variant)| variant.overrides.clone())
+            .unwrap_or_default()
     }
 
     /// Creates and returns the folder that holds custom themes.
@@ -1492,7 +1516,7 @@ impl AppSettings {
         fca: FullscreenControlsAutohide,
         cx: &mut Context<Self>,
     ) {
-        self.values.appearance.fullscreen_controls_autohide = fca.id().to_owned();
+        self.values.appearance.fullscreen_controls_autohide = fca;
         self.schedule_save(cx);
     }
 
@@ -1950,46 +1974,89 @@ impl AppSettings {
         self.schedule_state_save(cx);
     }
 
-    /// Selects a built-in theme by its `ThemeKind` id or a theme file by its variant id, and
-    /// remembers a variant as the one its family opens on next time.
+    /// Selects a palette without changing appearance or the remembered variant of either mode.
     pub fn set_theme(&mut self, theme: impl Into<String>, cx: &mut Context<Self>) {
-        self.values.appearance.theme = theme.into();
-        if let Some(family) = self.theme_variant().map(|(family, _)| family.id.clone())
-            && self.state.theme_variants.get(&family) != Some(&self.values.appearance.theme)
-        {
-            let variant = self.values.appearance.theme.clone();
-            self.state.theme_variants.insert(family, variant);
-            self.schedule_state_save(cx);
+        if let Some((family, variant)) = self.theme_variant() {
+            let kind = match variant.is_light() {
+                true => ThemeKind::Light,
+                false => ThemeKind::Dark,
+            };
+            let key = format!("{}:{}", family.id, kind.id());
+            let id = variant.id.clone();
+            if self.state.theme_variants.get(&key) != Some(&id) {
+                self.state.theme_variants.insert(key, id);
+                self.schedule_state_save(cx);
+            }
         }
+        self.values.appearance.theme = theme.into();
         self.schedule_save(cx);
     }
 
-    /// Selects the variant `family_variant` picks for `family`. Returns false and changes
-    /// nothing when there is no such family.
+    /// Changes only the appearance policy, retaining the theme and both variant preferences.
+    pub fn set_appearance_mode(&mut self, mode: ThemeKind, cx: &mut Context<Self>) {
+        if mode != ThemeKind::System {
+            let unsupported = self
+                .theme_family()
+                .is_some_and(|family| family.variants_for(mode).next().is_none());
+            if unsupported {
+                self.set_theme("default", cx);
+            }
+        }
+        self.values.appearance.appearance_mode = mode;
+        self.schedule_save(cx);
+    }
+
+    /// Selects a family without replacing the independent appearance policy.
     pub fn set_theme_family(&mut self, family: &str, cx: &mut Context<Self>) -> bool {
-        let Some(variant) = self
-            .family_variant(family, cx)
-            .map(|variant| variant.id.clone())
-        else {
+        if !self.families.iter().any(|found| found.id == family) {
             return false;
-        };
-        self.set_theme(variant, cx);
+        }
+        if self
+            .theme_variant()
+            .is_some_and(|(selected, _)| selected.id == family)
+        {
+            return true;
+        }
+        self.set_theme(family, cx);
         true
     }
 
-    pub fn set_adaptive_theme(&mut self, adaptive: bool, cx: &mut Context<Self>) {
-        self.values.appearance.adaptive_theme = adaptive;
+    /// Remembers a family's light or dark variant independently, including under System.
+    pub fn set_theme_variant(&mut self, family: &str, variant: &str, cx: &mut Context<Self>) {
+        let Some(light) = self
+            .families
+            .iter()
+            .find(|found| found.id == family)
+            .and_then(|family| family.variant(variant))
+            .map(ThemeVariant::is_light)
+        else {
+            return;
+        };
+        let kind = match light {
+            true => ThemeKind::Light,
+            false => ThemeKind::Dark,
+        };
+        self.state
+            .theme_variants
+            .insert(format!("{}:{}", family, kind.id()), variant.to_owned());
+        self.schedule_state_save(cx);
+        self.set_theme(family, cx);
+    }
+
+    /// Adjusts colour and luminance together while retaining a slight tint at the low end.
+    pub fn set_ambient_intensity(&mut self, intensity: f32, cx: &mut Context<Self>) {
+        self.values.appearance.ambient_intensity = intensity.clamp(0., 1.);
         self.schedule_save(cx);
     }
 
-    pub fn set_ambient(&mut self, ambient: bool, cx: &mut Context<Self>) {
-        self.values.appearance.ambient = ambient;
+    pub fn set_ambient_motion(&mut self, animated: bool, cx: &mut Context<Self>) {
+        self.values.appearance.ambient_motion = animated;
         self.schedule_save(cx);
     }
 
     /// Applies a player bar layout immediately and saves it in the appearance preferences.
     pub fn set_player_bar_layout(&mut self, layout: PlayerBarLayout, cx: &mut Context<Self>) {
-        self.values.appearance.player_bar_layout = layout.id().to_owned();
+        self.values.appearance.player_bar_layout = layout;
         self.schedule_save(cx);
     }
 
@@ -1999,18 +2066,8 @@ impl AppSettings {
         self.schedule_save(cx);
     }
 
-    pub fn set_ambient_motion(&mut self, motion: bool, cx: &mut Context<Self>) {
-        self.values.appearance.ambient_motion = motion;
-        self.schedule_save(cx);
-    }
-
-    /// Picking a style turns the visualizer on; picking `None` turns it off and leaves the style
-    /// behind it alone, so the old choice comes back with it.
     pub fn set_visualizer_style(&mut self, style: ui::VisualizerStyle, cx: &mut Context<Self>) {
-        self.values.appearance.visualizer = style.shown();
-        if style.shown() {
-            self.values.appearance.visualizer_style = style.id().to_owned();
-        }
+        self.values.appearance.visualizer_style = style;
         self.schedule_save(cx);
     }
 
@@ -2030,8 +2087,8 @@ impl AppSettings {
         self.schedule_save(cx);
     }
 
-    pub fn set_rounding(&mut self, rounding: impl Into<String>, cx: &mut Context<Self>) {
-        self.values.appearance.rounding = rounding.into();
+    pub fn set_rounding(&mut self, rounding: Rounding, cx: &mut Context<Self>) {
+        self.values.appearance.rounding = rounding;
         self.schedule_save(cx);
     }
 
@@ -2054,7 +2111,7 @@ impl AppSettings {
         if self.stillness() == stillness {
             return;
         }
-        self.values.appearance.reduce_motion = stillness.id().to_owned();
+        self.values.appearance.reduce_motion = stillness;
         ui::motion::apply(stillness, self.pace(), cx);
         self.schedule_save(cx);
     }
@@ -2063,7 +2120,7 @@ impl AppSettings {
         if self.pace() == pace {
             return;
         }
-        self.values.appearance.motion_pace = pace.id().to_owned();
+        self.values.appearance.motion_pace = pace;
         ui::motion::apply(self.stillness(), pace, cx);
         self.schedule_save(cx);
     }
@@ -2072,7 +2129,7 @@ impl AppSettings {
         if self.system_theme() == kind {
             return;
         }
-        self.state.system_theme = kind.id().to_owned();
+        self.state.system_theme = kind;
         self.schedule_state_save(cx);
     }
 
@@ -2080,7 +2137,7 @@ impl AppSettings {
         if self.saver() == saver {
             return;
         }
-        self.values.appearance.battery_saver = saver.id().to_owned();
+        self.values.appearance.battery_saver = saver;
         self.schedule_save(cx);
     }
 
@@ -2097,7 +2154,7 @@ impl AppSettings {
         target_os = "macos"
     ))]
     pub fn set_window_rounding(&mut self, rounding: Rounding, cx: &mut Context<Self>) {
-        self.values.appearance.window_rounding = rounding.id().to_owned();
+        self.values.appearance.window_rounding = rounding;
         self.schedule_save(cx);
     }
 

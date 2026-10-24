@@ -109,6 +109,13 @@ impl ThemeFamily {
     pub fn variant(&self, id: &str) -> Option<&ThemeVariant> {
         self.variants.iter().find(|variant| variant.id == id)
     }
+
+    /// Variants eligible for this appearance; System offers both polarities.
+    pub fn variants_for(&self, kind: ThemeKind) -> impl Iterator<Item = &ThemeVariant> + Clone {
+        self.variants.iter().filter(move |variant| {
+            kind == ThemeKind::System || variant.is_light() == (kind == ThemeKind::Light)
+        })
+    }
 }
 
 /// A scan of the user's themes folder and whether transient I/O failures merit another scan.
@@ -375,7 +382,7 @@ fn utf8_stem(path: &Path) -> Option<&str> {
 
 /// Whether `id` is taken by a built-in theme, which a theme file cannot replace.
 fn reserved(id: &str) -> bool {
-    ThemeKind::ALL.into_iter().any(|kind| kind.id() == id)
+    matches!(id, "default" | "ambient")
 }
 
 /// Names a family after the words all its variant titles share and each variant after the rest

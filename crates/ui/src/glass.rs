@@ -13,6 +13,8 @@ const POPOVER_FILL: f32 = 0.82;
 /// Both are thicker than a menu's, since a bar sits over the page for good and its text has to
 /// read over whatever scrolls by.
 const BAR_FILL: f32 = 0.86;
+/// Ambient bars retain enough artwork behind the blur to belong to the surrounding field.
+const AMBIENT_BAR_FILL: f32 = 0.4;
 const BAR_BLUR: Pixels = px(18.);
 
 /// Whether a surface that only frosts for the look of it should frost at all. A backdrop blur
@@ -56,12 +58,29 @@ pub fn popover_surface<E: Styled>(element: E, cx: &App) -> E {
     }
 }
 
-/// Styles chrome that stays over scrolling content, the player bar and a table's head: a thick
-/// popover fill over a wide blur. The caller asks `blurring` first, since without the blur the
+/// The opaque material of a bar: artwork-coloured in Ambient, otherwise the popover palette.
+pub fn bar_fill(cx: &App) -> Hsla {
+    let theme = cx.theme();
+    match theme.ambient {
+        true => Hsla {
+            a: 1.,
+            ..theme.secondary
+        },
+        false => theme.popover,
+    }
+}
+
+/// Styles bars over scrolling content with a wide blur and a palette-aware fill. Ambient
+/// keeps the colour field visible; other themes use the popover material. The caller asks
+/// `blurring` first, since without the blur the
 /// thin fill would leave the text on the bare page.
 pub fn bar_surface<E: Styled>(element: E, cx: &App) -> E {
+    let fill = match cx.theme().ambient {
+        true => AMBIENT_BAR_FILL,
+        false => BAR_FILL,
+    };
     element
-        .bg(cx.theme().popover.opacity(BAR_FILL))
+        .bg(bar_fill(cx).opacity(fill))
         .backdrop_blur(BAR_BLUR)
 }
 

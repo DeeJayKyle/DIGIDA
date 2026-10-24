@@ -2,14 +2,15 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::{Duration, Instant};
 
 use gpui::{
-    App, Global, Hsla, Pixels, Rgba, SharedString, Task, WindowAppearance,
-    WindowBackgroundAppearance, px, rgb, rgba,
+    App, Global, Hsla, Pixels, SharedString, Window, WindowAppearance, WindowBackgroundAppearance,
+    px, rgb, rgba,
 };
 use i18n::t;
 use serde::{Deserialize, Serialize};
 
 use crate::metrics::{Metrics, Rounding, Text};
-use crate::palette::CoverPalette;
+use crate::motion::mix;
+use crate::palette::{AmbientPalette, CoverPalette};
 
 pub const MIN_FONT: f32 = 10.;
 pub const MAX_FONT: f32 = 24.;
@@ -18,8 +19,7 @@ pub const BACKDROP_TRANSPARENCY: f32 = 0.15;
 pub const MIN_LYRICS_SCALE: f32 = 0.6;
 pub const MAX_LYRICS_SCALE: f32 = 2.;
 
-const FADE: Duration = Duration::from_millis(320);
-const FRAME: Duration = Duration::from_millis(8);
+const FADE: Duration = Duration::from_millis(800);
 
 const SURFACE_TINT: f32 = 0.5;
 const BORDER_TINT: f32 = 0.4;
@@ -74,6 +74,10 @@ pub struct Look {
     pub rounding: Rounding,
     pub font: f32,
     pub transparent: bool,
+    /// Whether surfaces reveal an animated background inside the window.
+    pub ambient: bool,
+    /// Fraction of the artwork treatment blended over the base palette.
+    pub ambient_strength: f32,
     pub transparency: f32,
     /// Whether the frosted treatments are painted. See `ui::blurring`.
     pub blur: bool,
@@ -81,11 +85,14 @@ pub struct Look {
     pub blur_window: bool,
     pub tint: Option<Hsla>,
     pub tint_secondary: Option<Hsla>,
+    /// The artwork’s broad colour, retaining the neutral and pale parts of the cover.
+    pub tint_background: Option<Hsla>,
 }
 
 /// The built-in neutral palettes. Every other theme is a theme file laid over `Dark`, and the
 /// adaptive theme tints only these.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum ThemeKind {
     System,
     Dark,
@@ -108,16 +115,6 @@ impl ThemeKind {
             Self::System => t!("theme-system"),
             Self::Dark => t!("theme-dark"),
             Self::Light => t!("theme-light"),
-        }
-    }
-
-    /// The kind an id names. Any other id, such as a theme file's, names `Dark`, the palette
-    /// a theme file is laid over.
-    pub fn from_id(id: &str) -> Self {
-        match id {
-            "system" => Self::System,
-            "light" => Self::Light,
-            _ => Self::Dark,
         }
     }
 
@@ -198,55 +195,6 @@ pub struct ThemeOverrides {
 }
 
 impl ThemeOverrides {
-    /// Applies valid values from `overlay` and keeps the remaining values.
-    pub fn merged(mut self, overlay: &Self) -> Self {
-        macro_rules! apply_color {
-            ($($field:ident),+ $(,)?) => {
-                $(
-                    if overlay.$field.as_deref().is_some_and(|value| parse_color(value).is_some()) {
-                        self.$field = overlay.$field.clone();
-                    }
-                )+
-            };
-        }
-
-        apply_color!(
-            background,
-            foreground,
-            border,
-            muted,
-            overlay,
-            overlay_foreground,
-            muted_foreground,
-            secondary,
-            secondary_hover,
-            secondary_active,
-            primary,
-            primary_foreground,
-            primary_hover,
-            danger,
-            danger_foreground,
-            danger_hover,
-            popover,
-            popover_foreground,
-            progress_bar,
-            selection,
-            sidebar,
-            sidebar_accent,
-            sidebar_border,
-            title_bar_border,
-            table_head,
-            table_head_foreground,
-            table_row_border,
-            table_hover,
-            table_active,
-            table_active_border,
-        );
-        self.radius = overlay.radius.or(self.radius);
-        self.font_size = overlay.font_size.or(self.font_size);
-        self
-    }
-
     /// Reports whether a field is one of the color tokens a theme file may set. Radius and font
     /// size are left out because the Appearance pickers own them.
     pub fn is_color(field: &str) -> bool {
@@ -385,6 +333,10 @@ pub struct Theme {
     pub font_size: Pixels,
     pub metrics: Metrics,
     pub transparent: bool,
+    /// Whether surfaces reveal an animated background inside the window.
+    pub ambient: bool,
+    /// Fraction of the artwork treatment blended over the base palette.
+    pub ambient_strength: f32,
     /// Whether the frosted treatments are painted. Read it through `ui::blurring` rather
     /// than reaching for the field, so every site asks the same question.
     pub blur: bool,
@@ -395,13 +347,17 @@ pub struct Theme {
     /// The cover's runner-up hue, carried beside the lead tint for two-colour
     /// surfaces like the fullscreen ambient background. The selection itself stays single.
     pub tint_secondary: Option<Hsla>,
+    /// The artwork’s broad colour, retaining the neutral and pale parts of the cover.
+    pub tint_background: Option<Hsla>,
+    /// Field colours resolved before fading, keeping surfaces and background in step.
+    pub ambient_palette: AmbientPalette,
 }
 
 impl Global for Theme {}
 
 #[derive(Default)]
 struct Transition {
-    task: Option<Task<()>>,
+    generation: u64,
 }
 
 impl Global for Transition {}
@@ -443,10 +399,14 @@ impl Theme {
             font_size: px(14.),
             metrics: Metrics::default(),
             transparent: false,
+            ambient: false,
+            ambient_strength: 0.,
             blur: false,
             blur_window: false,
             tint: None,
             tint_secondary: None,
+            tint_background: None,
+            ambient_palette: AmbientPalette::default(),
         }
     }
 
@@ -486,10 +446,14 @@ impl Theme {
             font_size: px(14.),
             metrics: Metrics::default(),
             transparent: false,
+            ambient: false,
+            ambient_strength: 0.,
             blur: false,
             blur_window: false,
             tint: None,
             tint_secondary: None,
+            tint_background: None,
+            ambient_palette: AmbientPalette::default(),
         }
     }
 
@@ -665,6 +629,8 @@ impl Theme {
             foreground,
             border,
             muted,
+            overlay,
+            overlay_foreground,
             muted_foreground,
             secondary,
             secondary_hover,
@@ -690,6 +656,20 @@ impl Theme {
             table_active,
             table_active_border,
         );
+        theme.ambient_palette = AmbientPalette {
+            colors: std::array::from_fn(|i| {
+                mix(
+                    self.ambient_palette.colors[i],
+                    other.ambient_palette.colors[i],
+                    delta,
+                )
+            }),
+            background: mix(
+                self.ambient_palette.background,
+                other.ambient_palette.background,
+                delta,
+            ),
+        };
         theme
     }
 
@@ -785,22 +765,78 @@ impl Theme {
             .unwrap_or(look.font)
             .clamp(MIN_FONT, MAX_FONT));
         let mut theme = Self::for_kind(look.kind);
-
-        if let Some(tint) = look.tint {
-            theme = theme.tinted(tint);
-        }
         theme.radius = look.rounding.radius();
         theme = theme.with_overrides(overrides);
+        if let Some(tint) = look.tint {
+            let mut tinted = theme.tinted(tint);
+            if look.ambient {
+                let dark = theme.background.l < 0.5;
+                // Pure black cannot show a hue. Lift low surfaces just enough for the
+                // artwork wash to read as clearly as it does on coloured theme files.
+                for surface in [
+                    &mut tinted.sidebar,
+                    &mut tinted.secondary,
+                    &mut tinted.muted,
+                ] {
+                    surface.s = surface.s.max(tint.s * 0.4);
+                    if dark {
+                        surface.l = surface.l.max(0.14);
+                    }
+                }
+                // The solid player surface needs visible colour in light mode too; a
+                // near-white fill hides its hue even at full artwork strength.
+                tinted.secondary.s = tinted.secondary.s.max(tint.s * 0.6);
+                tinted.secondary.l = match dark {
+                    true => tinted.secondary.l.max(0.18),
+                    false => tinted.secondary.l.min(0.84),
+                };
+                // Keep text nearly neutral: saturated ink loses contrast against the field's
+                // changing hues, especially for small labels and secondary track information.
+                for text in [&mut tinted.foreground, &mut tinted.popover_foreground] {
+                    text.s = text.s.min(0.08);
+                    text.l = match dark {
+                        true => 0.98,
+                        false => 0.10,
+                    };
+                }
+                for text in [
+                    &mut tinted.muted_foreground,
+                    &mut tinted.table_head_foreground,
+                ] {
+                    text.s = text.s.min(0.10);
+                    text.l = match dark {
+                        true => 0.92,
+                        false => 0.26,
+                    };
+                }
+            }
+            theme = theme.mixed(&tinted, look.ambient_strength.clamp(0., 1.));
+        }
         if look.transparent {
             theme.see_through(1. - look.transparency.clamp(0., MAX_TRANSPARENCY));
         }
         theme.font_size = base;
         theme.metrics = Metrics::new(base);
+        if look.ambient {
+            theme.sidebar = theme
+                .sidebar
+                .opacity(1. - look.ambient_strength * (1. - SURFACE_WEIGHT));
+            theme.secondary = theme
+                .secondary
+                .opacity(1. - look.ambient_strength * (1. - SURFACE_WEIGHT));
+            theme.table_head = theme
+                .table_head
+                .opacity(1. - look.ambient_strength * (1. - HEADER_WEIGHT));
+        }
+        theme.ambient = look.ambient;
+        theme.ambient_strength = look.ambient_strength;
         theme.transparent = look.transparent;
         theme.blur = look.blur;
         theme.blur_window = look.blur_window;
         theme.tint = look.tint;
         theme.tint_secondary = look.tint_secondary;
+        theme.tint_background = look.tint_background;
+        theme.ambient_palette = AmbientPalette::new(&theme);
         theme
     }
 
@@ -813,40 +849,35 @@ impl Theme {
     }
 
     pub fn set(look: Look, overrides: &ThemeOverrides, cx: &mut App) {
-        cx.default_global::<Transition>().task = None;
+        cx.default_global::<Transition>().generation += 1;
         cx.set_global(Self::for_look(resolve(look, cx), overrides));
         cx.refresh_windows();
     }
 
     pub fn fade(look: Look, overrides: &ThemeOverrides, cx: &mut App) {
+        let Some(handle) = cx
+            .windows()
+            .first()
+            .copied()
+            .filter(|_| crate::motion::animates(cx))
+        else {
+            Self::set(look, overrides, cx);
+            return;
+        };
         let from = *cx.theme();
         let to = Self::for_look(resolve(look, cx), overrides);
-
-        cx.default_global::<Transition>().task = None;
+        cx.default_global::<Transition>().generation += 1;
+        let generation = cx.default_global::<Transition>().generation;
+        let start = Instant::now();
         cx.set_global(from.mixed(&to, 0.));
         cx.refresh_windows();
-
-        let task = cx.spawn(async move |cx| {
-            let start = Instant::now();
-            loop {
-                cx.background_executor().timer(FRAME).await;
-
-                let delta = start.elapsed().as_secs_f32() / FADE.as_secs_f32();
-                let step = match delta >= 1. {
-                    true => to,
-                    false => from.mixed(&to, ease_out(delta)),
-                };
-                cx.update(|cx| {
-                    cx.set_global(step);
-                    cx.refresh_windows();
+        handle
+            .update(cx, |_, window, _| {
+                window.on_next_frame(move |window, cx| {
+                    fade_frame(from, to, start, generation, window, cx)
                 });
-
-                if delta >= 1. {
-                    break;
-                }
-            }
-        });
-        cx.default_global::<Transition>().task = Some(task);
+            })
+            .ok();
     }
 }
 
@@ -867,20 +898,28 @@ fn veil(color: Hsla, opacity: f32, floor: f32) -> Hsla {
     }
 }
 
-fn mix(from: Hsla, to: Hsla, delta: f32) -> Hsla {
-    let (from, to) = (Rgba::from(from), Rgba::from(to));
-    let channel = |from: f32, to: f32| from + (to - from) * delta;
-
-    Hsla::from(Rgba {
-        r: channel(from.r, to.r),
-        g: channel(from.g, to.g),
-        b: channel(from.b, to.b),
-        a: channel(from.a, to.a),
-    })
-}
-
-fn ease_out(delta: f32) -> f32 {
-    1. - (1. - delta.clamp(0., 1.)).powi(3)
+/// Advances the shared colour transition on the display clock; newer targets cancel old frames.
+fn fade_frame(
+    from: Theme,
+    to: Theme,
+    start: Instant,
+    generation: u64,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    if cx.default_global::<Transition>().generation != generation {
+        return;
+    }
+    let delta = match crate::motion::animates(cx) {
+        true => (start.elapsed().as_secs_f32() / FADE.as_secs_f32()).min(1.),
+        false => 1.,
+    };
+    let eased = delta * delta * (3. - 2. * delta);
+    cx.set_global(from.mixed(&to, eased));
+    cx.refresh_windows();
+    if delta < 1. {
+        window.on_next_frame(move |window, cx| fade_frame(from, to, start, generation, window, cx));
+    }
 }
 
 fn wash(base: Hsla, tint: Hsla, strength: f32) -> Hsla {
@@ -979,11 +1018,14 @@ mod tests {
             rounding: Rounding::Subtle,
             font: 14.,
             transparent: false,
+            ambient: false,
+            ambient_strength: 0.,
             transparency: 0.,
             blur: false,
             blur_window: false,
             tint: Some(TINT),
             tint_secondary: None,
+            tint_background: None,
         };
         let overrides = ThemeOverrides {
             background: Some("#101010".to_owned()),

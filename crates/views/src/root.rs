@@ -109,7 +109,7 @@ pub struct Root {
     /// Whether the window is in OS fullscreen because opening the fullscreen view put it there.
     os_entered: bool,
     screens: Screens,
-    adaptive: Entity<Adaptive>,
+    _adaptive: Entity<Adaptive>,
     background: Option<gpui::WindowBackgroundAppearance>,
     /// The font the window is set in and the name it was built from, rebuilt only when the
     /// chosen font changes since the root renders every frame anything below it animates.
@@ -285,12 +285,14 @@ impl Root {
                     ThemeKind::assume(reported);
                     settings.update(cx, |settings, cx| settings.set_system_theme(reported, cx));
                 }
-                if ThemeKind::from_id(settings.read(cx).theme()) != ThemeKind::System || !changed {
+                if settings.read(cx).appearance_mode() != ThemeKind::System || !changed {
                     return;
                 }
                 let settings = settings.read(cx);
                 let look = Look {
                     tint: cx.theme().tint,
+                    tint_secondary: cx.theme().tint_secondary,
+                    tint_background: cx.theme().tint_background,
                     ..settings.look()
                 };
                 let overrides = settings.theme_overrides();
@@ -342,7 +344,7 @@ impl Root {
                 equalizer,
                 settings_open: false,
             },
-            adaptive,
+            _adaptive: adaptive,
             ambient,
             jam_invite: cx.new(JamInvite::new),
             background: None,
@@ -473,12 +475,8 @@ impl Root {
             .update(cx, |workspace, cx| workspace.show_side(tab, cx));
     }
 
-    /// Tells the adaptive theme and the wake lock whether fullscreen is up. The ambient
-    /// background is painted out of the cover's hues, so fullscreen samples the cover even with
-    /// the adaptive theme off, and leaving drops the tint again.
+    /// Keeps the display awake while the fullscreen player is shown.
     fn announce_fullscreen(&self, fullscreen: bool, cx: &mut Context<Self>) {
-        self.adaptive
-            .update(cx, |adaptive, cx| adaptive.set_fullscreen(fullscreen, cx));
         let wake = Sonora::global(cx).wake.clone();
         wake.update(cx, |wake, cx| wake.set_fullscreen(fullscreen, cx));
     }
@@ -1065,10 +1063,16 @@ impl Render for Root {
         #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
         let radius: Option<gpui::Pixels> = None;
 
-        // The ambient field covers the window whole and carries the window's own opacity, so
-        // the page colour under it would only stack a second alpha beneath that and leave a
-        // see-through fullscreen reading nearly solid.
-        let ambient = matches!(self.view, RootView::Fullscreen) && ambient::shown(cx);
+        // Split the window's alpha between the base and the ambient layer so blending the
+        // field never makes a transparent window more opaque than the chosen opacity.
+        let ambient = ambient::shown(cx);
+        let base_weight = match ambient {
+            true => {
+                (1. - theme.ambient_strength)
+                    / (1. - theme.background.a * theme.ambient_strength).max(f32::EPSILON)
+            }
+            false => 1.,
+        };
 
         // The shell enters the way a page enters the workspace. An opaque window fades it
         // under a scrim of the page colour, which leaves the workspace's cached views alone,
@@ -1118,7 +1122,7 @@ impl Render for Root {
             .when_some(radius, |this, radius| {
                 this.rounded(radius).overflow_hidden()
             })
-            .when(!ambient, |this| this.bg(theme.background))
+            .bg(theme.background.opacity(base_weight))
             .text_color(theme.foreground)
             .capture_any_mouse_down(|_, window, cx| {
                 if ui::cancel_middle_scroll(cx) {

@@ -1,4 +1,5 @@
 use gpui::prelude::*;
+use serde::{Deserialize, Serialize};
 use std::f32::consts::FRAC_PI_2;
 
 use gpui::{
@@ -36,7 +37,8 @@ const ARC_STEPS: usize = 12;
 const WAVE_STEPS: usize = 8;
 
 /// How the spectrum is drawn behind the fullscreen artwork.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum VisualizerStyle {
     None,
     Bars,
@@ -58,15 +60,6 @@ impl VisualizerStyle {
             Self::Bars => "bars",
             Self::Wave => "wave",
             Self::Both => "both",
-        }
-    }
-
-    pub fn from_id(id: &str) -> Self {
-        match id {
-            "none" => Self::None,
-            "bars" => Self::Bars,
-            "wave" => Self::Wave,
-            _ => Self::default(),
         }
     }
 

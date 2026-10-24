@@ -6,7 +6,7 @@ use i18n::t;
 use state::SYSTEM_FONT;
 use ui::{
     ActiveTheme as _, Button, Look, MAX_FONT, MAX_TRANSPARENCY, MIN_FONT, MenuItem, OptionCard,
-    Picker, Rounding, Scrubber, Switch, Theme, ThemeKind,
+    Picker, Rounding, Scrubber, Switch, Theme,
 };
 
 use super::rows::grid;
@@ -23,22 +23,32 @@ const TYPEFACE_GUESS: usize = 24;
 const TYPEFACE_BATCH: usize = 3;
 
 impl SettingsView {
-    pub(super) fn appearance_groups(&self) -> Vec<Group> {
+    pub(super) fn appearance_groups(&self, cx: &App) -> Vec<Group> {
         vec![
             Group::new("settings-theme", "icons/palette.svg")
-                .cards(Slot::Theme)
-                .rows([Slot::Adaptive]),
+                .cards(Slot::AppearanceMode)
+                .cards(Slot::Theme),
+            Group::new("settings-group-background", "icons/blend.svg").rows(
+                self.settings
+                    .read(cx)
+                    .ambient_theme()
+                    .then_some([Slot::AmbientIntensity, Slot::AmbientAnimated])
+                    .into_iter()
+                    .flatten(),
+            ),
             Group::new("settings-icons", "icons/layout-grid.svg").cards(Slot::Icons),
             Group::new("settings-corners", "icons/maximize.svg").cards(Slot::Corners),
             Group::new("settings-group-text", "icons/text-select.svg")
                 .rows([Slot::Typeface, Slot::Font]),
             Group::new("settings-group-window", "icons/panel-left-open.svg").rows(
-                [Slot::Opacity]
-                    .into_iter()
+                std::iter::once(Slot::Opacity)
                     .chain(ui::WINDOW_BLUR.then_some(Slot::WindowBlur))
                     .chain([Slot::Blur]),
             ),
         ]
+        .into_iter()
+        .filter(|group| !group.rows.is_empty() || !group.cards.is_empty())
+        .collect()
     }
 
     /// The look the theme is drawn from now, with the tint the adaptive theme put on it.
@@ -46,6 +56,7 @@ impl SettingsView {
         Look {
             tint: cx.theme().tint,
             tint_secondary: cx.theme().tint_secondary,
+            tint_background: cx.theme().tint_background,
             ..self.settings.read(cx).look()
         }
     }
@@ -333,7 +344,7 @@ impl SettingsView {
                     .selected(look.rounding == rounding)
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.settings.update(cx, |settings, cx| {
-                            settings.set_rounding(rounding.id(), cx);
+                            settings.set_rounding(rounding, cx);
                         });
                         Theme::set(Look { rounding, ..look }, &overrides, cx);
                         cx.notify();
@@ -392,39 +403,49 @@ impl SettingsView {
         self.row(t!("settings-opacity"), control.into_any_element())
     }
 
-    pub(super) fn adaptive_row(&self, cx: &mut Context<Self>) -> AnyElement {
-        let (on, neutral) = {
-            let settings = self.settings.read(cx);
-            let theme = settings.theme();
-            (
-                settings.adaptive_theme(),
-                [ThemeKind::System, ThemeKind::Dark, ThemeKind::Light]
-                    .into_iter()
-                    .any(|kind| kind.id() == theme),
+    /// Colour strength blends the field into the default light or dark palette.
+    pub(super) fn ambient_intensity_row(&self, cx: &mut Context<Self>) -> AnyElement {
+        let value = self.settings.read(cx).ambient_intensity();
+        let theme = *cx.theme();
+        let control = div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(
+                div().w(theme.metrics.cover).child(
+                    Scrubber::new(&self.ambient_intensity, value)
+                        .colors(theme.progress_bar, theme.muted, theme.foreground)
+                        .on_move(cx.listener(|this, value: &f32, _, cx| {
+                            this.settings.update(cx, |settings, cx| {
+                                settings.set_ambient_intensity(*value, cx)
+                            });
+                        })),
+                ),
             )
-        };
-        let look = self.look(cx);
+            .child(
+                div()
+                    .flex_none()
+                    .w(theme.metrics.control * 1.5)
+                    .whitespace_nowrap()
+                    .text_right()
+                    .child(t!(
+                        "settings-opacity-value",
+                        percent = (value * 100.).round() as i64
+                    )),
+            );
+        self.row(t!("settings-ambient-strength"), control.into_any_element())
+    }
 
+    pub(super) fn ambient_animated_row(&self, cx: &mut Context<Self>) -> AnyElement {
+        let animated = self.settings.read(cx).ambient_motion();
         self.row(
-            t!("settings-adaptive"),
-            Switch::new("adaptive-theme", on)
+            t!("settings-ambient-motion"),
+            Switch::new("ambient-animate", animated)
+                .disabled(self.settings.read(cx).ambient_strength() == 0.)
                 .on_click(cx.listener(move |this, _, _, cx| {
-                    let adaptive = !on;
-                    let reset = adaptive && !neutral;
-                    let kind = match reset {
-                        true => ThemeKind::Dark,
-                        false => look.kind,
-                    };
-                    let overrides = this.settings.update(cx, |settings, cx| {
-                        settings.set_adaptive_theme(adaptive, cx);
-                        if reset {
-                            settings.set_theme(kind.id(), cx);
-                        }
-                        settings.theme_overrides()
+                    this.settings.update(cx, |settings, cx| {
+                        settings.set_ambient_motion(!animated, cx)
                     });
-                    if reset {
-                        Theme::fade(Look { kind, ..look }, &overrides, cx);
-                    }
                 }))
                 .into_any_element(),
         )

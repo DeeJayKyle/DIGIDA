@@ -76,7 +76,7 @@ pub(in crate::screens::settings) fn preview(
             .then(|| settings.romanization_scripts()),
     };
     let sizes = verse_sizes(false, settings.fullscreen_lyrics_scale(), &theme);
-    let field = settings.ambient().then(|| {
+    let field = settings.ambient_theme().then(|| {
         let cover = view.previews.playing_or_picked(cx).large_cover(cx);
         view.previews.ambient(cover, cx)
     });

@@ -107,6 +107,7 @@ fn sketch(layout: PlayerBarLayout, transparent: bool, cx: &App) -> Div {
         .bottom_0()
         .w_full()
         .h(relative(height))
+        .rounded_b(theme.radius)
         .border_t_1()
         .border_color(theme.border)
         .map(|panel| match transparent {
@@ -128,6 +129,7 @@ fn sketch(layout: PlayerBarLayout, transparent: bool, cx: &App) -> Div {
     div()
         .relative()
         .size_full()
+        .rounded(theme.radius)
         .bg(theme.background)
         .child(tile([0.05, 0.10, 0.35, 0.05], muted, radius))
         .children((0..4).map(|index| {
