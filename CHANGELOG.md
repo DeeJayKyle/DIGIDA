@@ -16,6 +16,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Skipped sections are lightly marked on the player bar and fullscreen seek bars using the
   current theme's colors.
 
+### Fixed
+
+- Playing YouTube Music videos and looking up lyrics no longer fills your YouTube search history
+  with song names. Only what you search for yourself shows up there.
+- The fullscreen visualizer keeps moving after a setting such as gapless playback restarts the
+  audio, instead of freezing until Sonora is restarted.
+- An album or playlist page shows Pause only when you are playing from that album or playlist,
+  not whenever the current song happens to be on it. Pressing Play there starts it.
+- YouTube Music tracks on an album with a numeric title, such as 17, show their real length
+  instead of the album title read as seconds.
+
 ## [0.44.1] - 2026-10-22
 
 ### Added
