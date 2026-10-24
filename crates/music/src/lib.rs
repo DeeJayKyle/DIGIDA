@@ -27,6 +27,7 @@ pub mod progress;
 pub mod scrobble;
 mod sink;
 mod spectrum;
+mod sponsorblock;
 pub mod spotify;
 mod stream;
 pub mod subsonic;
@@ -59,6 +60,7 @@ pub use models::{
 };
 pub use output::{Server as SoundServer, missing_bridge};
 pub use spectrum::{Analyzer, Level, Spectrum, Watch};
+pub use sponsorblock::{SkipSegment, SponsorBlock};
 
 pub const LOCAL_TRACK_PREFIX: &str = "local:";
 pub const LOCAL_ALBUM_PREFIX: &str = "local-album:";

@@ -7,6 +7,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- SponsorBlock in Settings → Playback can skip community-marked sponsors, self-promotion and
+  non-music sections in YouTube Music videos. It starts switched off.
+  Lookups use a video hash prefix for privacy and reuse recent results. Sections with unknown
+  or mismatched recording lengths are left alone.
+  Skipped sections are lightly marked on the player bar and fullscreen seek bars using the
+  current theme's colors.
+
 ### Fixed
 
 - Playing YouTube Music videos and looking up lyrics no longer fills your YouTube search history
