@@ -562,10 +562,17 @@ impl Output {
     /// Joins the shared stream for packets resampled to its rate already, and runs every sample
     /// through the equalizer and then the volume ramp before it reaches the mixer. `changed`
     /// hears when the stream has to reopen, playing or not.
+    ///
+    /// The player starts on one frame of silence in the stream's own format. An empty rodio
+    /// player reports mono at 48 kHz, and the mixer converting from that shifts every channel of
+    /// the first track over by one, which swaps left and right for good.
     pub fn open(chain: Chain, changed: UnboundedSender<()>) -> Result<Self> {
         let device = Device::acquire()?;
         device.listen(changed);
         let (sink, source) = rodio::Player::new();
+        if let Some(silence) = frame_of_silence(&device.info.format) {
+            sink.append(silence);
+        }
         let format = audio::PublishedFormat::default();
         let integer = matches!(device.info.format.sample, Sample::Integer(_));
         device.add(chain.apply(source, format.clone(), integer));
@@ -1052,6 +1059,14 @@ fn open_stream(
         .map_err(|error| anyhow::anyhow!("cannot open the audio output: {error}"))?;
     stream.log_on_drop(false);
     Ok((stream, frames))
+}
+
+/// One frame of silence in `format`, so a player that starts on it reports the stream's own
+/// channels and rate before any track is queued.
+fn frame_of_silence(format: &Format) -> Option<rodio::source::Zero> {
+    let channels = rodio::ChannelCount::new(format.channels)?;
+    let rate = rodio::SampleRate::new(format.rate)?;
+    rodio::source::Zero::new_samples(channels, rate, usize::from(format.channels)).ok()
 }
 
 /// Looks at `device` every `DEVICE_POLL` for as long as it is open, playing or not, and retires

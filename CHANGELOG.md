@@ -20,6 +20,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Music sounds right again on 5.1 and 7.1 speakers. The left channel no longer plays from the
   centre speaker with the front left silent, because Sonora now plays in stereo and lets your
   system spread it across the speakers.
+- Left and right no longer swap when your output runs at a sample rate other than 48 kHz, or
+  now and then when a song starts.
 
 ## [0.44.1] - 2026-10-22
 
