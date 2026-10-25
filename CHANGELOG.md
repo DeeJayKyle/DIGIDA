@@ -20,6 +20,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Typing Arabic or Hebrew in the search box puts the caret where it belongs.
 - YouTube Music libraries with more than about two dozen playlists or albums now show all of
   them. A new playlist no longer drops out of Add to playlist after you sign in again.
+- A `spotify://track/…` link opens that song, as `spotify:track:…` links already did.
 
 ## [0.44.2] - 2026-10-25
 
