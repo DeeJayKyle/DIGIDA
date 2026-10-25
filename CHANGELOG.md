@@ -7,6 +7,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Block a song or an artist from its menu so radio, autoplay and the queue skip it.
+
 ### Changed
 
 - When Spotify refuses to play on your account, a Why? button opens the FAQ explaining it.
