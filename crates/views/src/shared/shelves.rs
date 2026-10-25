@@ -169,8 +169,11 @@ impl Shelves {
                 div()
                     .flex()
                     .items_end()
+                    .justify_between()
+                    .gap_4()
                     .h(head(window, cx))
-                    .child(heading(i18n::translate(&section.title), cx)),
+                    .child(heading(i18n::translate(&section.title), cx))
+                    .children(self.play_all(place, section)),
             )
             .child(spread(cards, lanes))
             .into_any_element()
@@ -208,9 +211,17 @@ impl Shelves {
                     .gap_4()
                     .h(head(window, cx))
                     .child(heading(i18n::translate(&section.title), cx))
-                    .when(crowded, |this| {
-                        this.child(self.arrows(place, &handle, &glide, me))
-                    }),
+                    .child(
+                        div()
+                            .flex()
+                            .flex_none()
+                            .items_center()
+                            .gap_1()
+                            .children(self.play_all(place, section))
+                            .when(crowded, |this| {
+                                this.child(self.arrows(place, &handle, &glide, me))
+                            }),
+                    ),
             )
             .child(
                 div()
@@ -251,6 +262,21 @@ impl Shelves {
                     ),
             )
             .into_any_element()
+    }
+
+    /// The Play all at the right of a shelf's head, when every item on the shelf is a song.
+    fn play_all(&self, place: usize, section: &GenreSection) -> Option<Button> {
+        let tracks = section
+            .items
+            .iter()
+            .all(|item| matches!(item, GenreItem::Track(_)));
+        tracks.then(|| {
+            cards::play_all(
+                self.tag("play-all", place),
+                cards::songs(&section.items),
+                &self.playback,
+            )
+        })
     }
 
     fn arrows(

@@ -4,7 +4,7 @@ use i18n::t;
 use music::{Album, ArtistRef, Genre, GenreItem, Playlist, ReleaseType, SavedArtist, Track};
 use router::{Destination, navigate};
 use state::{Origin, Playback};
-use ui::{ActiveTheme as _, Card, InlineLinks, Pinnable, Text, Theme};
+use ui::{ActiveTheme as _, Button, Card, InlineLinks, Pinnable, Text, Theme};
 
 use crate::shared::cells;
 use crate::shared::menus::{CardMenu, Item};
@@ -172,6 +172,40 @@ pub(crate) fn item_card(
                 })
         }
     }
+}
+
+/// The songs among a shelf's items, in shelf order, which is what its Play all queues.
+pub(crate) fn songs(items: &[GenreItem]) -> Vec<Track> {
+    items
+        .iter()
+        .filter_map(|item| match item {
+            GenreItem::Track(track) => Some(track.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The small Play all button at the right of a song shelf's head, a play icon named by its
+/// tooltip. It queues `songs` in order from the first one that can play, as a page's Play does,
+/// and is disabled when none of them can.
+pub(crate) fn play_all(
+    id: impl Into<ElementId>,
+    songs: Vec<Track>,
+    playback: &Entity<Playback>,
+) -> Button {
+    let playback = playback.clone();
+
+    Button::new(id)
+        .small()
+        .outline()
+        .icon("icons/play.svg")
+        .tooltip("play-all")
+        .disabled(!songs.iter().any(|track| track.playable))
+        .on_click(move |_, _, cx| {
+            playback.update(cx, |playback, cx| {
+                playback.start_any(songs.clone(), None, cx)
+            });
+        })
 }
 
 pub(crate) fn genre_card(id: impl Into<ElementId>, genre: &Genre) -> Card {

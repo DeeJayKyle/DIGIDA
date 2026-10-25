@@ -136,6 +136,7 @@ impl HomeView {
 
         Picks::mixed("quick-picks", items, self.playback.clone(), width, page)
             .title("home-quick-picks")
+            .play_all()
             .vacancy("home-quick-picks-empty")
             .loading(self.home.read(cx).is_loading(cx))
             .when_some(name.filter(|name| !name.is_empty()), |deck, name| {

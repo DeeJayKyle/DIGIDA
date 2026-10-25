@@ -54,6 +54,14 @@ impl Rows {
             Self::Mixed(items) => items.len(),
         }
     }
+
+    /// The songs the deck holds, in deck order, leaving out anything that is not a track.
+    fn songs(&self) -> Vec<Track> {
+        match self {
+            Self::Tracks(tracks) => tracks.to_vec(),
+            Self::Mixed(items) => cards::songs(items),
+        }
+    }
 }
 
 /// A framed deck of list rows in up to three columns, paged with the arrows in its head.
@@ -73,6 +81,7 @@ pub(crate) struct Picks {
     on_next: Option<ClickHandler>,
     on_context_menu: Option<ContextHandler>,
     on_start: Option<StartHandler>,
+    play_all: bool,
 }
 
 impl Picks {
@@ -98,6 +107,7 @@ impl Picks {
             on_next: None,
             on_context_menu: None,
             on_start: None,
+            play_all: false,
         }
     }
 
@@ -125,6 +135,7 @@ impl Picks {
             on_next: None,
             on_context_menu: None,
             on_start: None,
+            play_all: false,
         }
     }
 
@@ -182,6 +193,12 @@ impl Picks {
         self.on_start = Some(Rc::new(handler));
         self
     }
+
+    /// Puts a Play all button before the arrows, which queues the deck's songs in order.
+    pub(crate) fn play_all(mut self) -> Self {
+        self.play_all = true;
+        self
+    }
 }
 
 impl RenderOnce for Picks {
@@ -199,6 +216,10 @@ impl RenderOnce for Picks {
         let on_next = self.on_next;
         let on_context_menu = self.on_context_menu;
         let on_start = self.on_start;
+        let songs = match self.play_all {
+            true => rows.songs(),
+            false => Vec::new(),
+        };
 
         div()
             .w_full()
@@ -233,6 +254,13 @@ impl RenderOnce for Picks {
                             .items_center()
                             .gap_1()
                             .pb_1()
+                            .when(!songs.is_empty(), |this| {
+                                this.child(cards::play_all(
+                                    SharedString::from(format!("{id}-play-all")),
+                                    songs,
+                                    &self.playback,
+                                ))
+                            })
                             .child(
                                 Button::new(SharedString::from(format!("{id}-previous")))
                                     .small()
