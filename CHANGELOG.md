@@ -7,6 +7,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Plex is a new provider. Sign in with your Plex account, pick a server and music library if you
+  have more than one, and play, search, rate, make playlists and read lyrics from your own Plex
+  Media Server.
+
 ### Changed
 
 - When Spotify refuses to play on your account, a Why? button opens the FAQ explaining it.
