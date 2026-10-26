@@ -1,18 +1,27 @@
 name: release
 
+# A release is built into a draft and published only once every file is on it, since the
+# repository keeps releases immutable: a published release takes no further uploads.
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      tag:
+        description: The version to release, such as v1.0.0. Left empty, the run only builds.
+        required: false
+        type: string
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ inputs.tag || github.ref }}
   cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
   CARGO_PROFILE_RELEASE_STRIP: symbols
   RUST_BACKTRACE: 1
+  # the tag to release, from a pushed tag or the manual run's input, empty for a plain build
+  TAG: ${{ inputs.tag || (startsWith(github.ref, 'refs/tags/') && github.ref_name) || '' }}
 
 jobs:
   windows:
@@ -37,10 +46,7 @@ jobs:
         id: meta
         shell: bash
         run: |
-          case "$GITHUB_REF" in
-            refs/tags/*) version="$GITHUB_REF_NAME" ;;
-            *) version="${GITHUB_SHA:0:7}" ;;
-          esac
+          version="${TAG:-${GITHUB_SHA:0:7}}"
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
       - uses: dtolnay/rust-toolchain@stable
@@ -95,7 +101,7 @@ jobs:
 
   release:
     needs: [windows]
-    if: startsWith(github.ref, 'refs/tags/')
+    if: ${{ (github.event_name == 'workflow_dispatch' && inputs.tag != '') || startsWith(github.ref, 'refs/tags/') }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -109,8 +115,6 @@ jobs:
           merge-multiple: true
 
       - name: stage the licenses
-        env:
-          VERSION: ${{ github.ref_name }}
         run: |
           set -euo pipefail
           mkdir -p licenses/icons
@@ -122,14 +126,12 @@ jobs:
             pack="$(basename "$(dirname "$licence")")"
             cp "$licence" "licenses/icons/LICENSE.$pack"
           done
-          tar -czf "dist/digida-$VERSION-licenses.tar.gz" -C licenses .
+          tar -czf "dist/digida-$TAG-licenses.tar.gz" -C licenses .
 
       - name: checksums
         run: cd dist && shasum -a 256 * > SHA256SUMS
 
       - name: release notes
-        env:
-          TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
           # the section of the changelog for this version, or the unreleased one before it is cut
@@ -139,10 +141,19 @@ jobs:
           ' CHANGELOG.md > notes.md
           test -s notes.md || echo "DIGIDA $TAG" > notes.md
 
-      - uses: softprops/action-gh-release@v2
+      - name: draft the release
+        uses: softprops/action-gh-release@v2
         with:
-          name: DIGIDA ${{ github.ref_name }}
+          tag_name: ${{ env.TAG }}
+          target_commitish: ${{ github.sha }}
+          name: DIGIDA ${{ env.TAG }}
           files: dist/*
           body_path: notes.md
-          prerelease: ${{ contains(github.ref_name, '-') }}
+          draft: true
+          prerelease: ${{ contains(env.TAG, '-') }}
           fail_on_unmatched_files: true
+
+      - name: publish the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest
