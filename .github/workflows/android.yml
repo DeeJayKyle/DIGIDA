@@ -31,6 +31,10 @@ jobs:
           distribution: temurin
           java-version: "17"
 
+      # the repository links its Linux builds with mold, build scripts and macros included
+      - name: system dependencies
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends mold
+
       - name: rust targets
         run: rustup target add aarch64-linux-android x86_64-linux-android
 
