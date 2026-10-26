@@ -748,6 +748,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "bindgen"
+version = "0.72.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "993776b509cfb49c750f11b8f07a46fa23e0a1386ffc01fb1e7d343efc387895"
+dependencies = [
+ "bitflags 2.13.1",
+ "cexpr",
+ "clang-sys",
+ "itertools 0.13.0",
+ "log",
+ "prettyplease",
+ "proc-macro2",
+ "quote",
+ "regex",
+ "rustc-hash 2.1.3",
+ "shlex 1.3.0",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "bit-set"
 version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1001,7 +1021,16 @@ dependencies = [
  "find-msvc-tools",
  "jobserver",
  "libc",
- "shlex",
+ "shlex 2.0.1",
+]
+
+[[package]]
+name = "cexpr"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6fac387a98bb7c37292057cffc56d62ecb629900026402633ae9160df93a8766"
+dependencies = [
+ "nom 7.1.3",
 ]
 
 [[package]]
@@ -1050,6 +1079,17 @@ dependencies = [
  "crypto-common",
  "inout",
  "zeroize",
+]
+
+[[package]]
+name = "clang-sys"
+version = "1.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "157a8ba7b480713b56f4c09fd13fc3e0a22a5dfab8097ba61cbc5feef950788a"
+dependencies = [
+ "glob",
+ "libc",
+ "libloading",
 ]
 
 [[package]]
@@ -2692,7 +2732,7 @@ dependencies = [
  "http_client",
  "image",
  "inventory",
- "itertools",
+ "itertools 0.14.0",
  "libc",
  "log",
  "lyon",
@@ -2837,7 +2877,7 @@ dependencies = [
  "gpui_apple",
  "gpui_util",
  "image",
- "itertools",
+ "itertools 0.14.0",
  "log",
  "objc",
  "objc2 0.6.4",
@@ -2909,7 +2949,7 @@ dependencies = [
  "etagere",
  "gpui",
  "gpui_util",
- "itertools",
+ "itertools 0.14.0",
  "log",
  "parking_lot",
  "profiling",
@@ -2939,7 +2979,7 @@ dependencies = [
  "gpui",
  "gpui_util",
  "image",
- "itertools",
+ "itertools 0.14.0",
  "log",
  "parking_lot",
  "rand 0.9.5",
@@ -3638,6 +3678,15 @@ name = "is_terminal_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a6cb138bb79a146c1bd460005623e142ef0181e3d0219cb493e02f7d08a35695"
+
+[[package]]
+name = "itertools"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "413ee7dfc52ee1a4949ceeb7dbc8a33f2d6c088194d9f922fb8318faf1f01186"
+dependencies = [
+ "either",
+]
 
 [[package]]
 name = "itertools"
@@ -4388,6 +4437,7 @@ dependencies = [
  "anyhow",
  "log",
  "music",
+ "rquickjs-sys",
  "storage",
  "tokio",
  "uniffi",
@@ -5704,6 +5754,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e8cf8e6a8aa66ce33f63993ffc4ea4271eb5b0530a9002db8455ea6050c77bfa"
 
 [[package]]
+name = "prettyplease"
+version = "0.2.37"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "479ca8adacdd7ce8f1fb39ce9ecccbfe93a3f1344b3d0d97f20bc0196208f62b"
+dependencies = [
+ "proc-macro2",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "primal-check"
 version = "0.3.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6139,7 +6199,7 @@ dependencies = [
  "built",
  "cfg-if",
  "interpolate_name",
- "itertools",
+ "itertools 0.14.0",
  "libc",
  "libfuzzer-sys",
  "log",
@@ -6560,6 +6620,7 @@ version = "0.12.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a13ac243b86a74120814ef7e9e30ad5a2c1199b7b9963b1cf7c84e4cdc1cad99"
 dependencies = [
+ "bindgen",
  "cc",
 ]
 
@@ -7187,6 +7248,12 @@ name = "shell-words"
 version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dc6fe69c597f9c37bfeeeeeb33da3530379845f10be461a66d16d03eca2ded77"
+
+[[package]]
+name = "shlex"
+version = "1.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
 
 [[package]]
 name = "shlex"
