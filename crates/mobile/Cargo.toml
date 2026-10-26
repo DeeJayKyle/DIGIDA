@@ -1,0 +1,31 @@
+[package]
+name = "mobile"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The library the Android app links: the music core behind a small API that UniFFI turns into
+# Kotlin. It names no GPUI type, so it builds for any target the music crate does.
+[lib]
+name = "digida_mobile"
+crate-type = ["lib", "cdylib"]
+
+[features]
+# The `uniffi-bindgen` binary that writes the Kotlin bindings, off in the library build.
+bindgen = ["uniffi/cli"]
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bindgen.rs"
+required-features = ["bindgen"]
+
+[dependencies]
+anyhow.workspace = true
+log.workspace = true
+music = { workspace = true, features = ["bundled-sqlite"] }
+storage = { workspace = true, features = ["bundled-sqlite"] }
+tokio.workspace = true
+uniffi.workspace = true
+
+[target.'cfg(target_os = "android")'.dependencies]
+android_logger.workspace = true

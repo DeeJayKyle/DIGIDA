@@ -86,6 +86,7 @@ zbus = { version = "5", default-features = false, features = ["async-io", "block
 libc = "0.2"
 lofty = "0.25"
 log = "0.4"
+android_logger = "0.15"
 md-5 = "0.10"
 moka = { version = "0.12.15", features = ["future", "sync"] }
 mpris-server = "0.10"
@@ -188,6 +189,7 @@ tokio = { version = "1.53", features = [
   "time",
 ] }
 time = { version = "0.3.55", features = ["parsing"] }
+uniffi = "0.32"
 
 [patch.crates-io]
 librespot-audio = { git = "https://github.com/sonorahq/librespot", rev = "84f551d4afc7823ef12b6b02d09e34e2ddaccf99" }

@@ -1,0 +1,92 @@
+name: android
+
+# Builds the Android app: the Rust core for each ABI, its Kotlin bindings, then the APK.
+on:
+  push:
+    branches: [android]
+  pull_request:
+    paths: ["android/**", "crates/mobile/**", "crates/music/**", "crates/storage/**"]
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      version:
+        description: The version the APK carries and is named by.
+        required: true
+        type: string
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_PROFILE_RELEASE_STRIP: symbols
+  DIGIDA_VERSION: ${{ inputs.version || '' }}
+
+jobs:
+  apk:
+    name: android
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: rust targets
+        run: rustup target add aarch64-linux-android x86_64-linux-android
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: android
+          cache-on-failure: true
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-ndk
+
+      - name: build the core
+        run: |
+          set -o pipefail
+          export ANDROID_NDK_HOME="$ANDROID_NDK_LATEST_HOME"
+          ./android/build-core.sh 2>&1 | tee core.log
+
+      # signed with the release key when the repository holds one, the debug key otherwise
+      - name: build the apk
+        working-directory: android
+        env:
+          KEYSTORE: ${{ secrets.DIGIDA_KEYSTORE_BASE64 }}
+          DIGIDA_KEYSTORE_PASSWORD: ${{ secrets.DIGIDA_KEYSTORE_PASSWORD }}
+          DIGIDA_KEY_ALIAS: ${{ secrets.DIGIDA_KEY_ALIAS }}
+          DIGIDA_KEY_PASSWORD: ${{ secrets.DIGIDA_KEY_PASSWORD }}
+        run: |
+          set -o pipefail
+          if [ -n "$KEYSTORE" ]; then
+            echo "$KEYSTORE" | base64 -d > "$RUNNER_TEMP/release.keystore"
+            export DIGIDA_KEYSTORE="$RUNNER_TEMP/release.keystore"
+          fi
+          ./gradlew --no-daemon --stacktrace assembleRelease 2>&1 | tee ../gradle.log
+
+      # The run's logs are not always at hand, so the errors are lifted into annotations.
+      - name: report the errors
+        if: failure()
+        run: |
+          for log in core.log gradle.log; do
+            [ -f "$log" ] || continue
+            grep -nE '^(error|e:)|error\[|What went wrong|FAILED|Unresolved|cannot find|not found' "$log" \
+              | head -60 > "$log.errors" || true
+            [ -s "$log.errors" ] || tail -40 "$log" > "$log.errors"
+            body="$(sed 's/%/%25/g' "$log.errors" | awk '{printf "%s%%0A", $0}')"
+            echo "::error title=$log::$body"
+          done
+
+      - name: stage the apk
+        run: |
+          set -euo pipefail
+          version="${DIGIDA_VERSION:-${GITHUB_SHA:0:7}}"
+          mkdir -p dist
+          cp android/app/build/outputs/apk/release/app-release.apk "dist/digida-$version-android.apk"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-android
+          path: dist/*
+          if-no-files-found: error
