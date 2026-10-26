@@ -775,6 +775,9 @@ pub struct Capabilities {
     /// one. Such a service downloads one track at a time, with no pause until it first refuses.
     /// Zero lets downloads run side by side.
     pub download_gap: Duration,
+    /// A playlist can be made public or private. A service whose playlists have no such setting
+    /// leaves this off, and the menu item that changes it is never shown.
+    pub playlist_visibility: bool,
 }
 
 impl Capabilities {
@@ -791,6 +794,7 @@ impl Capabilities {
         downloads: true,
         qualities: &[],
         download_gap: Duration::ZERO,
+        playlist_visibility: true,
     };
 
     /// Nothing beyond listing and playing.
@@ -804,6 +808,7 @@ impl Capabilities {
         downloads: false,
         qualities: &[],
         download_gap: Duration::ZERO,
+        playlist_visibility: false,
     };
 }
 
