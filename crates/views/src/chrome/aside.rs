@@ -2677,9 +2677,10 @@ fn selected_romanization(
 
 /// Which source a sheet came from and, when it names them, who wrote the song.
 fn credit_lines(source: &str, writers: &[String]) -> (SharedString, Option<SharedString>) {
-    let from = match source == music::lyrics::LOCAL {
-        true => t!("lyrics-source-local"),
-        false => t!("lyrics-source", source = source),
+    let from = match source {
+        music::lyrics::LOCAL => t!("lyrics-source-local"),
+        music::lyrics::OWN => t!("lyrics-source-own"),
+        _ => t!("lyrics-source", source = source),
     };
     let by = (!writers.is_empty()).then(|| {
         let writers = writers.join(", ");

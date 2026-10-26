@@ -1,14 +1,16 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use gpui::{Context, Entity, Task};
-use music::lyrics::LOCAL;
+use gpui::{App, Context, Entity, Task};
+use music::lyrics::{LOCAL, OWN};
 use music::{Lyrics as Sheet, LyricsHit, LyricsProvider, LyricsQuery, Track, TrackKey};
 use tokio::task::JoinSet;
 
+use crate::attached::{self, Attached};
 use crate::sheets::{Sheets, Unsaved};
-use crate::{AppSettings, Io, Playback, Queue, Session, join};
+use crate::{AppSettings, Io, Outcome, Playback, Queue, Session, Toast, Toasts, join};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LyricsState {
@@ -53,8 +55,15 @@ pub struct Lyrics {
     ahead: Option<Task<()>>,
     ahead_of: Option<String>,
     save: Option<Task<()>>,
+    /// The lyrics files the listener attached, by track key. Each wins over every source.
+    files: HashMap<String, PathBuf>,
+    attached: Attached,
+    /// Attaching or removing a file, which checks it and writes `state.sqlite` off the thread.
+    filing: Option<Task<()>>,
     /// Moves the old lyrics.json into the cache database, once.
     _migration: Task<()>,
+    /// Reads which tracks have a file attached, once.
+    _attachments: Task<()>,
 }
 
 impl Lyrics {
@@ -93,6 +102,25 @@ impl Lyrics {
         let migration = cx
             .background_executor()
             .spawn(async move { moving.migrate() });
+        let attached = Attached::new(storage::Database::standard());
+        let listing = attached.clone();
+        let attachments = cx.spawn(async move |this, cx| {
+            let listed = cx
+                .background_executor()
+                .spawn(async move { listing.all() })
+                .await;
+            this.update(cx, |this, cx| match listed {
+                Ok(files) if !files.is_empty() => {
+                    this.files = files;
+                    if let Some(id) = this.following.clone() {
+                        this.refresh(&id, cx);
+                    }
+                }
+                Ok(_) => {}
+                Err(error) => log::warn!("lyrics: {error:#}"),
+            })
+            .ok();
+        });
         Self {
             state: LyricsState::Idle,
             hits: Vec::new(),
@@ -116,7 +144,11 @@ impl Lyrics {
             ahead: None,
             ahead_of: None,
             save: None,
+            files: HashMap::new(),
+            attached,
+            filing: None,
             _migration: migration,
+            _attachments: attachments,
         }
     }
 
@@ -150,6 +182,83 @@ impl Lyrics {
         cx.notify();
     }
 
+    /// Whether the listener attached a lyrics file to the track.
+    pub fn has_file(&self, id: &str, cx: &App) -> bool {
+        self.files.contains_key(&self.track_key(id, cx))
+    }
+
+    /// Attaches the lyrics file at `path` to the track once it is found to hold lyrics. From then
+    /// on the track shows that file in place of every source.
+    pub fn attach_file(&mut self, id: String, path: PathBuf, cx: &mut Context<Self>) {
+        let key = self.track_key(&id, cx);
+        let attached = self.attached.clone();
+        let checked = path.clone();
+        let work = cx.background_executor().spawn(async move {
+            attached::read(&checked)?;
+            attached.set(&key, &checked)?;
+            anyhow::Ok(key)
+        });
+        self.filing = Some(cx.spawn(async move |this, cx| {
+            let done = work.await;
+            this.update(cx, |this, cx| {
+                this.filing = None;
+                match done {
+                    Ok(key) => {
+                        this.files.insert(key, path);
+                        Toasts::show(Outcome::Done, "toast-lyrics-file-attached", cx);
+                        this.refresh(&id, cx);
+                    }
+                    Err(error) => {
+                        log::warn!("lyrics: cannot attach {}: {error:#}", path.display());
+                        Toasts::post(
+                            Toast::new(Outcome::Failed, "toast-lyrics-file-failed")
+                                .detail(error.to_string()),
+                            cx,
+                        );
+                    }
+                }
+            })
+            .ok();
+        }));
+    }
+
+    /// Takes the attached file off the track, which goes back to its sources.
+    pub fn detach_file(&mut self, id: String, cx: &mut Context<Self>) {
+        let key = self.track_key(&id, cx);
+        let attached = self.attached.clone();
+        let removing = key.clone();
+        let work = cx
+            .background_executor()
+            .spawn(async move { attached.remove(&removing) });
+        self.filing = Some(cx.spawn(async move |this, cx| {
+            let done = work.await;
+            this.update(cx, |this, cx| {
+                this.filing = None;
+                match done {
+                    Ok(()) => {
+                        this.files.remove(&key);
+                        Toasts::show(Outcome::Done, "toast-lyrics-file-removed", cx);
+                        this.refresh(&id, cx);
+                    }
+                    Err(error) => {
+                        log::warn!("lyrics: {error:#}");
+                        Toasts::show(Outcome::Failed, "toast-lyrics-file-failed", cx);
+                    }
+                }
+            })
+            .ok();
+        }));
+    }
+
+    /// Looks the track on screen up again when it is `id`, so a file attached to it or taken off
+    /// it shows at once.
+    fn refresh(&mut self, id: &str, cx: &mut Context<Self>) {
+        if self.following.as_deref() == Some(id) {
+            self.following = None;
+            self.follow(cx);
+        }
+    }
+
     pub fn active_line(&self, cx: &Context<Self>) -> Option<usize> {
         let music::Lyrics::Synced { lines } = &self.current()?.lyrics else {
             return None;
@@ -179,6 +288,10 @@ impl Lyrics {
         self.settled = false;
         self.revision = self.revision.wrapping_add(1);
 
+        if let Some(path) = self.files.get(&self.track_key(&id, cx)).cloned() {
+            self.task = Some(self.read_attached(id, track, path, cx));
+            return;
+        }
         // A file's own lyrics are never cached, so an edit to its tags shows on the next play.
         if !self.reads_file(&id, cx)
             && let Some(found) = self.recall(&id)
@@ -192,6 +305,45 @@ impl Lyrics {
             return;
         }
         self.load(id, track, cx);
+    }
+
+    /// Shows the file attached to the track, read afresh. A file that is gone or holds no lyrics
+    /// is logged, and the track is looked up as if none were attached.
+    fn read_attached(
+        &mut self,
+        id: String,
+        track: Track,
+        path: PathBuf,
+        cx: &mut Context<Self>,
+    ) -> Task<()> {
+        self.hits.clear();
+        self.state = LyricsState::Loading;
+        cx.notify();
+        let read = cx
+            .background_executor()
+            .spawn(async move { attached::read(&path) });
+        cx.spawn(async move |this, cx| {
+            let read = read.await;
+            this.update(cx, |this, cx| {
+                if this.following.as_deref() != Some(id.as_str()) {
+                    return;
+                }
+                match read {
+                    Ok(lyrics) => {
+                        this.task = None;
+                        this.settled = true;
+                        this.hits = vec![own_hit(&track, lyrics)];
+                        this.state = LyricsState::Ready;
+                        cx.notify();
+                    }
+                    Err(error) => {
+                        log::warn!("lyrics: cannot use the attached file: {error:#}");
+                        this.load(id, track, cx);
+                    }
+                }
+            })
+            .ok();
+        })
     }
 
     /// Puts what `found` holds from the enabled sources on screen as the settled answer.
@@ -253,9 +405,14 @@ impl Lyrics {
     /// are enabled now, and the selection is applied when it is shown. Services that replied
     /// empty are asked again while the stored answer holds nothing usable.
     fn key(&self, id: &str, cx: &Context<Self>) -> String {
+        format!("{}:lyrics", self.track_key(id, cx))
+    }
+
+    /// The track's provider and id together, since two providers may use the same id.
+    fn track_key(&self, id: &str, cx: &App) -> String {
         match self.session.read(cx).slug_for(id) {
-            Some(slug) => format!("{slug}:{id}:lyrics"),
-            None => format!("{id}:lyrics"),
+            Some(slug) => format!("{slug}:{id}"),
+            None => id.to_owned(),
         }
     }
 
@@ -344,7 +501,10 @@ impl Lyrics {
         let Some(id) = track.id.as_deref() else {
             return;
         };
-        if self.ahead_of.as_deref() == Some(id) || self.recalls(id) {
+        if self.ahead_of.as_deref() == Some(id)
+            || self.recalls(id)
+            || self.files.contains_key(&self.track_key(id, cx))
+        {
             return;
         }
         let (track, id) = (track.clone(), id.to_owned());
@@ -697,6 +857,21 @@ impl Found {
     /// on every play.
     fn covers(&self, provider: &Arc<dyn LyricsProvider>) -> bool {
         provider.name() != LOCAL && self.answered.contains(&provider.name())
+    }
+}
+
+/// The answer an attached file gives, credited to the track it is attached to.
+fn own_hit(track: &Track, lyrics: Sheet) -> LyricsHit {
+    LyricsHit {
+        source: OWN,
+        trust: 0,
+        lyrics,
+        instrumental: false,
+        title: track.name.clone(),
+        artist: track.artists.clone(),
+        album: Some(track.album.clone()),
+        duration: Some(track.duration),
+        writers: Vec::new(),
     }
 }
 
