@@ -399,6 +399,7 @@ pub(super) fn source_name(provider: &str) -> SharedString {
     let key = match provider {
         music::lyrics::LOCAL => "settings-lyrics-provider-local",
         "Subsonic" => "settings-lyrics-provider-subsonic",
+        "Plex" => "settings-lyrics-provider-plex",
         "Spotify" => "settings-lyrics-provider-spotify",
         "YouTube Music" => "settings-lyrics-provider-youtube",
         "Apple Music" => "settings-lyrics-provider-apple-music",
