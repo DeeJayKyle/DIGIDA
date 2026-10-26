@@ -11,9 +11,9 @@ const SOURCE: &str = "Apple Music";
 const SEARCH: &str = "https://lyrics-api.binimum.org/";
 const TRUST: u32 = 180;
 const AGENT: &str = concat!(
-    "sonora/",
+    "digida/",
     env!("CARGO_PKG_VERSION"),
-    " (https://github.com/sonorahq/sonora)"
+    " (https://github.com/DeeJayKyle/DIGIDA)"
 );
 
 pub struct Binimum {

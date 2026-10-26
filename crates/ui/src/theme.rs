@@ -8,6 +8,7 @@ use gpui::{
 use i18n::t;
 use serde::{Deserialize, Serialize};
 
+use crate::finish::Finish;
 use crate::metrics::{Metrics, Rounding, Text};
 use crate::palette::CoverPalette;
 
@@ -71,6 +72,8 @@ pub fn backdrop(blur_window: bool, transparent: bool) -> WindowBackgroundAppeara
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Look {
     pub kind: ThemeKind,
+    /// The material surfaces are drawn in. See `ui::Finish`.
+    pub finish: Finish,
     pub rounding: Rounding,
     pub font: f32,
     pub transparent: bool,
@@ -384,6 +387,9 @@ pub struct Theme {
     pub radius: Pixels,
     pub font_size: Pixels,
     pub metrics: Metrics,
+    /// The material surfaces are drawn in. Elements read it through the helpers in
+    /// `ui::finish` rather than matching on it themselves.
+    pub finish: Finish,
     pub transparent: bool,
     /// Whether the frosted treatments are painted. Read it through `ui::blurring` rather
     /// than reaching for the field, so every site asks the same question.
@@ -442,6 +448,7 @@ impl Theme {
             radius: px(6.),
             font_size: px(14.),
             metrics: Metrics::default(),
+            finish: Finish::Glass,
             transparent: false,
             blur: false,
             blur_window: false,
@@ -485,6 +492,7 @@ impl Theme {
             radius: px(6.),
             font_size: px(14.),
             metrics: Metrics::default(),
+            finish: Finish::Glass,
             transparent: false,
             blur: false,
             blur_window: false,
@@ -785,17 +793,20 @@ impl Theme {
             .unwrap_or(look.font)
             .clamp(MIN_FONT, MAX_FONT));
         let mut theme = Self::for_kind(look.kind);
+        look.finish.tone(&mut theme);
 
         if let Some(tint) = look.tint {
             theme = theme.tinted(tint);
         }
-        theme.radius = look.rounding.radius();
+        theme.radius = look.finish.radius(look.rounding.radius());
         theme = theme.with_overrides(overrides);
+        look.finish.glaze(&mut theme);
         if look.transparent {
             theme.see_through(1. - look.transparency.clamp(0., MAX_TRANSPARENCY));
         }
         theme.font_size = base;
         theme.metrics = Metrics::new(base);
+        theme.finish = look.finish;
         theme.transparent = look.transparent;
         theme.blur = look.blur;
         theme.blur_window = look.blur_window;
@@ -976,6 +987,7 @@ mod tests {
     fn overrides_win_over_the_tint() {
         let look = Look {
             kind: ThemeKind::Dark,
+            finish: Finish::Neu,
             rounding: Rounding::Subtle,
             font: 14.,
             transparent: false,

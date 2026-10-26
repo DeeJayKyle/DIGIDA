@@ -179,8 +179,8 @@ impl RenderOnce for Modal {
                     .rounded(corners(theme.radius))
                     .border_1()
                     .border_color(theme.border)
-                    .bg(theme.popover)
-                    .shadow_md()
+                    .bg(crate::finish::surface_fill(&theme, theme.popover))
+                    .map(|this| crate::finish::raised(this, crate::finish::Depth::High, cx))
                     .overflow_hidden()
                     .child(
                         div()

@@ -11,6 +11,9 @@ const TILE: u32 = 512;
 /// band steps by one level at a time, so a couple of levels is the whole budget: one to
 /// scatter the step, the rest is the grain itself.
 const PUSH: u8 = 2;
+/// How far a pixel of the paper texture can push what it covers, out of 255. Strong enough to
+/// read as the tooth of a printed sheet, faint enough that text on it stays crisp.
+const TOOTH: u8 = 14;
 
 /// The dither tile, built once for the process. Each pixel is nudged toward white or toward
 /// black by up to `PUSH`, which spreads every eight bit step of a gradient across a band of
@@ -19,34 +22,53 @@ const PUSH: u8 = 2;
 fn tile() -> Arc<RenderImage> {
     static TILED: OnceLock<Arc<RenderImage>> = OnceLock::new();
 
-    TILED
-        .get_or_init(|| {
-            let mut seed = 0x2545_f491_4f6c_dd1d_u64;
-            let mut roll = move || {
-                seed ^= seed << 13;
-                seed ^= seed >> 7;
-                seed ^= seed << 17;
-                seed
-            };
-            let mut pixels = RgbaImage::new(TILE, TILE);
-            for pixel in pixels.pixels_mut() {
-                let draw = roll();
-                let level = match draw & 1 {
-                    0 => 0,
-                    _ => 255,
-                };
-                let alpha = (draw >> 8) as u8 % (PUSH + 1);
-                *pixel = image::Rgba([level, level, level, alpha]);
-            }
-            Arc::new(RenderImage::new(vec![Frame::new(pixels)]))
-        })
-        .clone()
+    TILED.get_or_init(|| noise(PUSH)).clone()
+}
+
+/// The paper tile, built once for the process like the dither, at the strength of `TOOTH`.
+fn paper() -> Arc<RenderImage> {
+    static TILED: OnceLock<Arc<RenderImage>> = OnceLock::new();
+
+    TILED.get_or_init(|| noise(TOOTH)).clone()
+}
+
+/// A tile of pixels each nudged toward white or toward black by up to `push`.
+fn noise(push: u8) -> Arc<RenderImage> {
+    let mut seed = 0x2545_f491_4f6c_dd1d_u64;
+    let mut roll = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed
+    };
+    let mut pixels = RgbaImage::new(TILE, TILE);
+    for pixel in pixels.pixels_mut() {
+        let draw = roll();
+        let level = match draw & 1 {
+            0 => 0,
+            _ => 255,
+        };
+        let alpha = (draw >> 8) as u8 % (push + 1);
+        *pixel = image::Rgba([level, level, level, alpha]);
+    }
+    Arc::new(RenderImage::new(vec![Frame::new(pixels)]))
 }
 
 /// Lays dither over whatever it covers, for a wide gradient that would otherwise band. The
 /// parent has to be `relative`, and the tile is sized in device pixels so the grain stays one
 /// pixel wide however the display is scaled.
 pub fn grain(window: &Window) -> Div {
+    tiled(window, tile)
+}
+
+/// Lays a paper grain over whatever it covers, for the skeuomorphic finish's printed page. The
+/// parent has to be `relative`, as for `grain`.
+pub fn texture(window: &Window) -> Div {
+    tiled(window, paper)
+}
+
+/// Covers the parent in copies of the tile `source` builds.
+fn tiled(window: &Window, source: fn() -> Arc<RenderImage>) -> Div {
     let scale = window.scale_factor().max(1.);
     let side = TILE as f32 / scale;
     let viewport = window.viewport_size();
@@ -61,7 +83,7 @@ pub fn grain(window: &Window) -> Div {
         .overflow_hidden()
         .children((0..down).flat_map(move |row| {
             (0..across).map(move |column| {
-                img(tile())
+                img(source())
                     .absolute()
                     .left(px(column as f32 * side))
                     .top(px(row as f32 * side))

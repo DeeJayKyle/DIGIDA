@@ -230,7 +230,7 @@ fn gmp(profile: &Path) -> Option<PathBuf> {
 pub fn store() -> PathBuf {
     dirs::cache_dir()
         .unwrap_or_else(std::env::temp_dir)
-        .join("sonora")
+        .join("digida")
         .join("widevine")
 }
 

@@ -557,10 +557,18 @@ impl Render for PlayerBar {
             .when_else(
                 transparent,
                 |this| ui::bar_surface(this, cx).text_color(theme.popover_foreground),
-                |this| this.when(!theme.transparent, |this| this.bg(theme.secondary)),
+                |this| {
+                    this.when(!theme.transparent, |this| {
+                        this.bg(ui::surface_fill(&theme, theme.secondary))
+                    })
+                },
             )
             .border_t_1()
             .border_color(theme.border)
+            // the bar stands over the page it docks against, in the finish's own relief
+            .when(theme.finish != ui::Finish::Glass, |this| {
+                ui::raised(this, ui::Depth::Mid, cx)
+            })
             .occlude()
             .on_mouse_move(cx.listener(Self::hover));
 

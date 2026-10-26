@@ -511,7 +511,7 @@ impl Render for LoginView {
                     .gap_2()
                     .child(
                         div()
-                            .child("Sonora")
+                            .child("DIGIDA")
                             .text_size(theme.text(Text::Display))
                             .font_weight(FontWeight::BOLD),
                     )

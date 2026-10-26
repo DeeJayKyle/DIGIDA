@@ -14,7 +14,7 @@ use ui::{ActiveTheme as _, Button, SMALL_INSET, Text};
 const ICON: Pixels = px(18.);
 const REACH: Pixels = px(340.);
 /// Where the README says what to install alongside Sonora.
-const INSTALL: &str = "https://github.com/sonorahq/sonora#linux";
+const INSTALL: &str = "https://github.com/DeeJayKyle/DIGIDA#linux";
 
 type Handler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
 
@@ -222,8 +222,8 @@ fn card_element(card: Card, cx: &App) -> AnyElement {
         .rounded(theme.radius)
         .border_1()
         .border_color(theme.border)
-        .shadow_md()
-        .bg(theme.popover)
+        .map(|this| ui::raised(this, ui::Depth::High, cx))
+        .bg(ui::surface_fill(theme, theme.popover))
         .text_color(theme.foreground)
         .child(
             div()

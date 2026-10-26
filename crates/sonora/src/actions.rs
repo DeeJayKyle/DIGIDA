@@ -128,7 +128,7 @@ fn menus() -> Vec<Menu> {
         ],
     };
     let mut menus = vec![Menu {
-        name: "Sonora".into(),
+        name: "DIGIDA".into(),
         disabled: false,
         items: app,
     }];

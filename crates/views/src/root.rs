@@ -103,6 +103,9 @@ pub struct Root {
     navigation_transition: Option<Task<()>>,
     /// The entrance the shell plays as the window moves from one shell to another.
     shell_entrance: Option<Entrance>,
+    /// The finish the shell was last drawn in. A change replays the shell's entrance, so the new
+    /// material settles in as the palette fades over rather than cutting.
+    finish: ui::Finish,
     /// The OS fullscreen move the next render owes the fullscreen view, true as it opens and
     /// false as it closes.
     os_follow: Option<bool>,
@@ -272,6 +275,19 @@ impl Root {
         })
         .detach();
 
+        cx.observe(
+            &Sonora::global(cx).settings.clone(),
+            |this, settings, cx| {
+                let finish = settings.read(cx).finish();
+                if finish != this.finish {
+                    this.finish = finish;
+                    this.reveal_shell(cx);
+                    cx.notify();
+                }
+            },
+        )
+        .detach();
+
         cx.observe_window_activation(window, |_, window, cx| update_focus_for_wake(window, cx))
             .detach();
         update_focus_for_wake(window, cx);
@@ -316,6 +332,7 @@ impl Root {
             pending: None,
             navigation_transition: None,
             shell_entrance: None,
+            finish: Sonora::global(cx).settings.read(cx).finish(),
             os_follow: None,
             os_entered: false,
             screens: Screens {
@@ -1068,7 +1085,13 @@ impl Render for Root {
         // The ambient field covers the window whole and carries the window's own opacity, so
         // the page colour under it would only stack a second alpha beneath that and leave a
         // see-through fullscreen reading nearly solid.
-        let ambient = matches!(self.view, RootView::Fullscreen) && ambient::shown(cx);
+        // Glass stands the same field behind the workspace, since a frost over a flat page
+        // shows nothing.
+        let fullscreen = matches!(self.view, RootView::Fullscreen);
+        let ambient =
+            (fullscreen && ambient::shown(cx)) || (!fullscreen && theme.finish.backdrop());
+        self.ambient
+            .update(cx, |field, _| field.set_page(ambient && !fullscreen));
 
         // The shell enters the way a page enters the workspace. An opaque window fades it
         // under a scrim of the page colour, which leaves the workspace's cached views alone,
@@ -1189,7 +1212,11 @@ impl Render for Root {
                 show_sign_in,
                 |this| this.child(div().flex().flex_1().min_h_0().child(self.login.clone())),
                 |this| this.child(shell),
-            );
+            )
+            // the skeuomorphic page is printed on paper, grain and all
+            .when(theme.finish.grained() && !fullscreen, |this| {
+                this.child(ui::texture(window))
+            });
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         let root = root.child(WindowFrame::new());
         root

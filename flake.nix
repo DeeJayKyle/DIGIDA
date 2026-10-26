@@ -209,7 +209,7 @@
                   ''
                 else
                   ''
-                    install -Dm444 "$src/assets/linux/sonora.desktop" \
+                    install -Dm444 "$src/assets/linux/digida.desktop" \
                       "$out/share/applications/sonora.desktop"
                     install -Dm444 "$src/assets/linux/sonora.svg" \
                       "$out/share/icons/hicolor/scalable/apps/sonora.svg"
@@ -268,7 +268,7 @@
                 ''
                   runHook preInstall
                   install -Dm755 "$src" "$out/bin/sonora"
-                  install -Dm444 ${./assets/linux/sonora.desktop} \
+                  install -Dm444 ${./assets/linux/digida.desktop} \
                     "$out/share/applications/sonora.desktop"
                   install -Dm444 ${./assets/linux/sonora.svg} \
                     "$out/share/icons/hicolor/scalable/apps/sonora.svg"

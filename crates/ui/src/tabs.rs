@@ -306,6 +306,9 @@ impl RenderOnce for TabBar {
             .border_1()
             .border_color(theme.border)
             .when(blurred, |bar| bar.shadow_sm())
+            .when(!blurred && !glassy && crate::finish::sculpted(cx), |bar| {
+                crate::finish::pressed(bar, crate::finish::Depth::Low, cx)
+            })
             .when(glassy, |bar| glass(bar, cx))
             .child(row)
             .when_some(rails.filter(|_| !glassy), |bar, rails| {

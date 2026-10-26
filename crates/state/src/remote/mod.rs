@@ -20,8 +20,8 @@ use self::souvlaki::Controls;
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 use mpris::Controls;
 
-const BUS_NAME: &str = "sonora";
-const DISPLAY_NAME: &str = "Sonora";
+const BUS_NAME: &str = "digida";
+const DISPLAY_NAME: &str = "DIGIDA";
 /// How far the position may stray from where steady playback would have put it before the
 /// widget is told the track was seeked.
 const SEEK_SLACK: Duration = Duration::from_secs(2);
@@ -267,7 +267,7 @@ fn is_remote(cover: &str) -> bool {
 async fn artwork(url: &str) -> Result<PathBuf> {
     let dir = dirs::cache_dir()
         .unwrap_or_else(std::env::temp_dir)
-        .join("sonora")
+        .join("digida")
         .join(ARTWORK);
     let mut hasher = DefaultHasher::new();
     url.hash(&mut hasher);

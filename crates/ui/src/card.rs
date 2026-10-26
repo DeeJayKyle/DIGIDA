@@ -444,6 +444,25 @@ impl RenderOnce for Card {
             }
         };
 
+        // A tile's artwork stands off the page in the finish's relief, the way a sleeve sits on
+        // a shelf. Glass leaves it flat, since its depth is the frost around it.
+        let leading = match tile.is_some() && theme.finish != crate::Finish::Glass {
+            true => div()
+                .flex_none()
+                .rounded(match (circle, art_radius) {
+                    (true, _) => art / 2.,
+                    (false, Some(radius)) => radius,
+                    (false, None) => theme.radius.min(ROUNDED),
+                })
+                .shadow(crate::finish::raised_shadows(
+                    &theme,
+                    crate::finish::Depth::Mid,
+                ))
+                .child(leading)
+                .into_any_element(),
+            false => leading,
+        };
+
         let title = div()
             .id("card-title")
             .min_w_0()

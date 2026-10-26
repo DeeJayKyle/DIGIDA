@@ -48,6 +48,13 @@ const DOWNSCALE: f32 = 4.;
 /// an opaque stack multiplying every layer by what it lets through is the same picture, and a
 /// black sheet this strong was most of what a see-through window's alpha went on.
 const SHADE: f32 = 0.55;
+/// How much darker the field draws behind a light glass page, which has only the field to
+/// frost and no lyrics to hold up, so it stays a pastel wash.
+const PAGE_SHADE: f32 = 0.04;
+/// The same behind a dark glass page: darker than the light one, lighter than the lyrics need.
+const PAGE_SHADE_DARK: f32 = 0.38;
+/// The hues the field drifts through behind a glass page when no cover has lent it a colour.
+const AURORA: [f32; BLOBS] = [0.74, 0.6, 0.52, 0.9, 0.66];
 
 /// One blob: base centre (fractions of the layer), diameter (fraction of the
 /// layer's smaller side), drift period in seconds, phase, drift amplitude
@@ -97,6 +104,8 @@ pub(crate) struct Ambient {
     painted: Option<[Hsla; BLOBS]>,
     /// The palette of the cover a framed field follows, `None` for the one behind the window.
     framed: Option<Sampled>,
+    /// Whether the field stands behind the workspace's glass rather than behind fullscreen.
+    page: bool,
 }
 
 /// The palette of the cover a framed field follows, sampled by the field itself.
@@ -121,6 +130,7 @@ impl Ambient {
             bounds: Rc::new(Cell::new(Bounds::default())),
             painted: None,
             framed: None,
+            page: false,
         }
     }
 
@@ -132,6 +142,36 @@ impl Ambient {
             framed: Some(Sampled::default()),
             ..Self::new(cx)
         }
+    }
+
+    /// Says whether the field stands behind the workspace's glass rather than fullscreen. The
+    /// page wants a lighter hand on a light theme and an aurora when no cover tints it.
+    pub(crate) fn set_page(&mut self, page: bool) {
+        self.page = page;
+    }
+
+    /// The darkness the field is drawn under: the lyrics' heavy shade, or a lighter veil behind
+    /// a glass page.
+    fn shade(&self, theme: &Theme) -> f32 {
+        match (self.page, theme.background.l >= 0.5) {
+            (true, true) => PAGE_SHADE,
+            (true, false) => PAGE_SHADE_DARK,
+            (false, _) => SHADE,
+        }
+    }
+
+    /// The field's colours behind a glass page no cover has tinted: a slow aurora.
+    fn aurora(theme: &Theme) -> [Hsla; BLOBS] {
+        let light = theme.background.l >= 0.5;
+        AURORA.map(|h| Hsla {
+            h,
+            s: 0.7,
+            l: match light {
+                true => 0.72,
+                false => 0.5,
+            },
+            a: 1.,
+        })
     }
 
     /// Samples `cover` for a framed field once it differs from the one sampled last. A field
@@ -280,7 +320,12 @@ impl Render for Ambient {
             }
             false => 0.,
         };
-        let colors = self.wash(Self::colors(&self.tinted(theme)), animates);
+        let target = match (self.page, theme.tint) {
+            (true, None) => Self::aurora(&theme),
+            _ => Self::colors(&self.tinted(theme)),
+        };
+        let colors = self.wash(target, animates);
+        let shade = self.shade(&theme);
         // The field stands in for the page rather than sitting on it, so it carries the
         // window's own opacity and `Root` paints no background beneath it. One opacity thins
         // every layer at once; a quad still adds to what it covers, which is why the blobs
@@ -316,10 +361,13 @@ impl Render for Ambient {
                     .absolute()
                     .inset_0()
                     .when_some(radius, |this, radius| this.rounded(radius))
-                    .bg(shaded(Hsla {
-                        a: 1.,
-                        ..theme.background
-                    })),
+                    .bg(shaded(
+                        Hsla {
+                            a: 1.,
+                            ..theme.background
+                        },
+                        shade,
+                    )),
             )
             // The blur spreads the blobs past any shape they could be cut to, so a rounded window
             // fades them out toward every edge instead. The fade sits on an unblurred layer the
@@ -362,7 +410,7 @@ impl Render for Ambient {
                                             .top(px((grown - stepped) / 2.))
                                             .size(px(stepped))
                                             .rounded_full()
-                                            .bg(shaded(color).opacity(opacity))
+                                            .bg(shaded(color, shade).opacity(opacity))
                                     }))
                             })),
                     ),
@@ -400,10 +448,13 @@ impl Ambient {
             .overflow_hidden()
             .opacity(clarity)
             .child(measure(&self.bounds))
-            .child(div().absolute().inset_0().bg(shaded(Hsla {
-                a: 1.,
-                ..theme.background
-            })))
+            .child(div().absolute().inset_0().bg(shaded(
+                Hsla {
+                    a: 1.,
+                    ..theme.background
+                },
+                SHADE,
+            )))
             .children(SPECS.iter().zip(colors).map(|(spec, color)| {
                 let (x, y, span) = drift(*spec, elapsed, wide, high);
                 let core = span * CORE;
@@ -417,7 +468,7 @@ impl Ambient {
                     .size(px(core))
                     .rounded_full()
                     .shadow(vec![BoxShadow {
-                        color: shaded(color).opacity(PEAK),
+                        color: shaded(color, SHADE).opacity(PEAK),
                         offset: point(px(away), px(0.)),
                         blur_radius: px(span * SOFT),
                         spread_radius: px(0.),
@@ -466,12 +517,12 @@ fn drift(spec: Spec, elapsed: f32, wide: f32, high: f32) -> (f32, f32, f32) {
     (x * wide, y * high, span)
 }
 
-/// A colour as the dark overlay leaves it. Black at `SHADE` over an opaque colour is that
+/// A colour as the dark overlay leaves it. Black at `shade` over an opaque colour is that
 /// colour's channels cut by what the sheet lets through, so cutting them here is the same
 /// picture with one layer fewer to spend the window's alpha on.
-fn shaded(color: Hsla) -> Hsla {
+fn shaded(color: Hsla, shade: f32) -> Hsla {
     let rgba = Rgba::from(color);
-    let kept = 1. - SHADE;
+    let kept = 1. - shade;
 
     Hsla::from(Rgba {
         r: rgba.r * kept,

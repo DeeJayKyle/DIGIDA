@@ -8,6 +8,7 @@ mod deck;
 mod drag;
 mod explicit;
 mod filters;
+pub mod finish;
 mod form;
 mod glass;
 mod glide;
@@ -74,12 +75,13 @@ pub use explicit::ExplicitBadge;
 pub use filters::{
     Filter, FilterChange, FlagAxis, RangeAxis, RangeScrubber, RangeState, SortAxis, Unit,
 };
+pub use finish::{Depth, Finish, chosen, pressed, raised, sculpted, surface_fill};
 pub use form::{FORM_CONTEXT, Submit};
 pub use glass::{
     GLASS_BLUR, GLASS_FILL, bar_surface, blurring, frost, glass, popover_fill, popover_surface,
 };
 pub use glide::{Glide, ScrollPosition};
-pub use grain::grain;
+pub use grain::{grain, texture};
 pub use info_card::{Fact, InfoCard};
 pub use inline_links::{InlineLink, InlineLinks};
 pub use input::{

@@ -23,7 +23,7 @@ static BUILDS: Semaphore = Semaphore::const_new(1);
 fn path(id: &str, stamp: u32) -> PathBuf {
     dirs::cache_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("sonora")
+        .join("digida")
         .join("mosaics")
         .join(format!("{}-{stamp}.png", sanitised(id)))
 }

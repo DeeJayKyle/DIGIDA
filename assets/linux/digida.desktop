@@ -1,13 +1,13 @@
 [Desktop Entry]
 Type=Application
-Name=Sonora
+Name=DIGIDA
 GenericName=Music Player
 Comment=A native music streaming client, built with Rust and GPUI
-Icon=sonora
-Exec=sonora %U
+Icon=digida
+Exec=digida %U
 Terminal=false
 Categories=AudioVideo;Audio;Player;
 Keywords=music;spotify;audio;player;
 MimeType=x-scheme-handler/spotify;x-scheme-handler/deezer;x-scheme-handler/tidal;audio/mpeg;audio/flac;audio/mp4;audio/aac;audio/ogg;audio/opus;audio/x-wav;audio/x-aiff;audio/webm;audio/x-matroska;audio/x-wavpack;audio/x-ape;
-StartupWMClass=sonora
+StartupWMClass=digida
 StartupNotify=true

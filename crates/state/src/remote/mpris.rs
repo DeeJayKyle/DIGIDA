@@ -12,8 +12,8 @@ use tokio::sync::mpsc;
 use super::{BUS_NAME, Command, DISPLAY_NAME};
 use crate::{PlaybackState, Repeat};
 
-/// The desktop entry a native install ships, `sonora.desktop`.
-const DESKTOP_ENTRY: &str = "sonora";
+/// The desktop entry a native install ships, `digida.desktop`.
+const DESKTOP_ENTRY: &str = "digida";
 
 /// A change to publish on the MPRIS player, applied in the order it was sent.
 enum Update {

@@ -6,6 +6,7 @@ use gpui::{
 
 use std::time::Duration;
 
+use crate::finish::{Depth, Finish, pressed_shadows, raised_shadows};
 use crate::menu::Menu;
 use crate::metrics::Text;
 use crate::motion::{HoverFade, mix};
@@ -203,6 +204,14 @@ impl RenderOnce for OptionCard {
             false => 0.,
         };
         let rest = theme.secondary.opacity(FILL);
+        // The finish's relief: a card stands off the page, rises further as the pointer lights
+        // it and sinks in once chosen. Glass keeps to its lit edge.
+        let relief = match (theme.finish, selected, lit > 0.5) {
+            (Finish::Glass, _, _) => raised_shadows(&theme, Depth::Low),
+            (_, true, _) => pressed_shadows(&theme, Depth::Mid),
+            (_, false, true) => raised_shadows(&theme, Depth::Mid),
+            (_, false, false) => raised_shadows(&theme, Depth::Low),
+        };
 
         let frame = div()
             .relative()
@@ -217,6 +226,7 @@ impl RenderOnce for OptionCard {
                     .when(dashed, |this| this.border_dashed())
                     .border_color(mix(theme.border, theme.muted_foreground, lit))
                     .bg(mix(rest, theme.secondary_hover, lit))
+                    .shadow(relief)
                     .children(thumb),
             )
             // a disabled card is dimmed by a veil of the page colour rather than by opacity,

@@ -2,11 +2,12 @@ use std::f32::consts::TAU;
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, ClickEvent, Div, ElementId, Hsla, Interactivity, MouseButton, Pixels,
-    SharedString, Stateful, StyleRefinement, Transformation, Window, div, px, radians, relative,
-    svg,
+    AnyElement, App, BoxShadow, ClickEvent, Div, ElementId, Hsla, Interactivity, MouseButton,
+    Pixels, SharedString, Stateful, StyleRefinement, Transformation, Window, div, px, radians,
+    relative, svg,
 };
 
+use crate::finish::{Depth, Finish, pressed_shadows, raised_shadows, surface_fill};
 use crate::glass::{blurring, frost};
 use crate::metrics::Text;
 use crate::theme::ActiveTheme as _;
@@ -358,11 +359,22 @@ impl RenderOnce for Button {
             true => (palette.hover, palette.active),
             false => (None, None),
         };
+        // The finish's relief. A filled button stands off the page and sinks while pressed or
+        // chosen; a ghost lies flat until the pointer finds it, and under clay or neumorphism
+        // rises to meet it. A frosted button floats over artwork and keeps to its tint.
+        let relief = interactive && !frosted && !backgroundless;
+        let filled = palette.background.is_some() || palette.border.is_some();
+        let sculpted = matches!(theme.finish, Finish::Clay | Finish::Neu);
+        let rest = (relief && filled).then(|| raised_shadows(theme, Depth::Low));
+        let lifted = (relief && (filled || sculpted)).then(|| raised_shadows(theme, Depth::Low));
+        let sunk = relief.then(|| pressed_shadows(theme, Depth::Low));
+        let chosen = (selected && relief && theme.finish != Finish::Glass)
+            .then(|| pressed_shadows(theme, Depth::Low));
         let hovered = match hoverless {
             true => None,
-            false => state_style(hover, hovered, frosting),
+            false => state_style(hover, hovered, frosting, lifted),
         };
-        let pressed = state_style(active, pressed, frosting);
+        let pressed = state_style(active, pressed, frosting, sunk);
         let overrides = std::mem::take(base.style());
 
         let mut button = base
@@ -376,10 +388,14 @@ impl RenderOnce for Button {
             .rounded(radius)
             .text_color(foreground)
             .when(small, |this| this.text_size(theme.text(Text::Label)))
-            .when_some(palette.background, |this, background| this.bg(background))
+            .when_some(palette.background, |this, background| {
+                this.bg(surface_fill(theme, background))
+            })
             .when(selected && !backgroundless, |this| {
                 this.bg(selected_background)
             })
+            .when_some(rest, |this, shadows| this.shadow(shadows))
+            .when_some(chosen, |this, shadows| this.shadow(shadows))
             .when_some(palette.border, |this, border| {
                 this.border_1().border_color(border)
             })
@@ -454,16 +470,22 @@ impl RenderOnce for Button {
     }
 }
 
+/// The style a button takes while hovered or pressed: the state's fill, frosted when the button
+/// floats over artwork, the finish's relief for that state, and anything the caller asked for.
 fn state_style(
     background: Option<Hsla>,
     overrides: Option<StyleRefinement>,
     frosted: bool,
+    shadows: Option<Vec<BoxShadow>>,
 ) -> Option<StyleRefinement> {
-    if background.is_none() && overrides.is_none() {
+    if background.is_none() && overrides.is_none() && shadows.is_none() {
         return None;
     }
 
     let mut style = StyleRefinement::default();
+    if let Some(shadows) = shadows {
+        style = style.shadow(shadows);
+    }
     if let Some(background) = background {
         let filled = style.bg(background);
         style = match frosted {

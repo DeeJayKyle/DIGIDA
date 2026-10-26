@@ -10,9 +10,9 @@ use crate::{Io, Session, SessionEvent, join};
 const ENDPOINT: &str = "https://sonora-stats.nolight.dev/install";
 const RUNNING: &str = env!("CARGO_PKG_VERSION");
 const AGENT: &str = concat!(
-    "sonora/",
+    "digida/",
     env!("CARGO_PKG_VERSION"),
-    " (https://github.com/sonorahq/sonora)"
+    " (https://github.com/DeeJayKyle/DIGIDA)"
 );
 const REPORTED: &str = "reported_usage";
 const LOGGED_IN: &str = "logged_in_once";

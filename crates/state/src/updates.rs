@@ -8,19 +8,19 @@ use sha2::{Digest as _, Sha256};
 
 use crate::{AppSettings, Io, join};
 
-const LATEST: &str = "https://api.github.com/repos/sonorahq/sonora/releases/latest";
+const LATEST: &str = "https://api.github.com/repos/DeeJayKyle/DIGIDA/releases/latest";
 const INSTALLER: &str = match cfg!(target_arch = "aarch64") {
-    true => "Sonora-Setup-arm64.exe",
-    false => "Sonora-Setup.exe",
+    true => "DIGIDA-Setup-arm64.exe",
+    false => "DIGIDA-Setup.exe",
 };
 const SUMS: &str = "SHA256SUMS";
 const UNINSTALLER: &str = "unins000.exe";
 const RUNNING: &str = env!("CARGO_PKG_VERSION");
 const INSTALLABLE: bool = cfg!(target_os = "windows");
 const AGENT: &str = concat!(
-    "sonora/",
+    "digida/",
     env!("CARGO_PKG_VERSION"),
-    " (https://github.com/sonorahq/sonora)"
+    " (https://github.com/DeeJayKyle/DIGIDA)"
 );
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -233,7 +233,7 @@ async fn fetch(
         anyhow::bail!("the installer does not match its checksum");
     }
 
-    let path = std::env::temp_dir().join(format!("Sonora-Setup-{version}.exe"));
+    let path = std::env::temp_dir().join(format!("DIGIDA-Setup-{version}.exe"));
     std::fs::write(&path, &bytes).context("cannot keep the installer")?;
     Ok(path)
 }
