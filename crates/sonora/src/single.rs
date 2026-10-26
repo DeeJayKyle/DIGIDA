@@ -7,8 +7,8 @@ use interprocess::local_socket::{ListenerOptions, Name, Stream};
 use tokio::sync::mpsc::UnboundedSender;
 
 const SOCKET: &str = match cfg!(debug_assertions) {
-    true => "sonora-dev.sock",
-    false => "sonora.sock",
+    true => "digida-dev.sock",
+    false => "digida.sock",
 };
 
 pub enum Instance {
@@ -128,7 +128,7 @@ fn private_dir() -> io::Result<std::path::PathBuf> {
         (Some(runtime), None) => return Ok(runtime),
         (None, _) => dirs::cache_dir()
             .ok_or_else(|| io::Error::new(ErrorKind::NotFound, "no runtime or cache folder"))?
-            .join("sonora"),
+            .join("digida"),
     };
     std::fs::DirBuilder::new()
         .recursive(true)

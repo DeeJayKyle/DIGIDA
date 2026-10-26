@@ -564,7 +564,7 @@ impl SidebarLeft {
                     cx.notify();
                 })),
             None => row
-                .when(active, |button| button.bg(accent))
+                .when(active, |button| ui::chosen(button.bg(accent), cx))
                 .on_click(move |_, _, cx| match destination.in_settings() {
                     true => open_settings(cx),
                     false => navigate(destination.clone(), cx),
@@ -587,7 +587,7 @@ impl SidebarLeft {
 
             nav_row(id, key, tint, accent)
                 .flex_1()
-                .when(chosen, |button| button.bg(accent))
+                .when(chosen, |button| ui::chosen(button.bg(accent), cx))
                 .on_click(move |_, _, cx| navigate(destination.clone(), cx))
         };
 

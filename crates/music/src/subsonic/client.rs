@@ -30,7 +30,7 @@ const HOME_SONGS: i32 = 25;
 const HOME_ALBUMS: i32 = 12;
 const LIBRARY_PAGE: i32 = 500;
 const API_VERSION: &str = "1.16.1";
-const CLIENT_NAME: &str = "sonora";
+const CLIENT_NAME: &str = "digida";
 /// The OpenSubsonic extension that takes a playback position and state.
 const PLAYBACK_REPORT: &str = "playbackReport";
 

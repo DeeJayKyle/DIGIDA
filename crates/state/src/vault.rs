@@ -19,7 +19,7 @@ use music::vault::{MASTER, Vault};
 
 /// The keychain entry the master key is stored under.
 const KEYCHAIN_URL: &str = "sonora://kept-tracks";
-const KEYCHAIN_USER: &str = "sonora";
+const KEYCHAIN_USER: &str = "digida";
 /// How many gigabytes the cache of played tracks may take until the listener says otherwise.
 pub(crate) const CACHE_GB: u32 = 2;
 /// The bounds of that setting.
@@ -184,5 +184,5 @@ fn write_file(master: &[u8]) -> Result<()> {
 /// The key file sits in the data folder rather than in the cache folder, so clearing or copying
 /// the cache alone never carries the key with it. The downloads share the data folder.
 fn key_file() -> Option<PathBuf> {
-    Some(dirs::data_local_dir()?.join("sonora").join("vault.key"))
+    Some(dirs::data_local_dir()?.join("digida").join("vault.key"))
 }

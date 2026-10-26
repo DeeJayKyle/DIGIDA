@@ -105,7 +105,10 @@ impl RenderOnce for Switch {
 
         let movement = window.use_keyed_state((id, "movement"), cx, |_, _| Movement::new(checked));
         let animates = movement.update(cx, |movement, _| movement.turning(checked));
-        let knob = div().size(thumb).flex_none().rounded(thumb / 2.);
+        // the knob stands off a track sunk into the page, wherever the finish has relief
+        let knob = div().size(thumb).flex_none().rounded(thumb / 2.).shadow(
+            crate::finish::raised_shadows(&theme, crate::finish::Depth::Low),
+        );
 
         let mut switch = base
             .flex()
@@ -116,6 +119,10 @@ impl RenderOnce for Switch {
             .p(px(INSET))
             .rounded(height / 2.)
             .bg(background)
+            .shadow(crate::finish::pressed_shadows(
+                &theme,
+                crate::finish::Depth::Low,
+            ))
             .border_1()
             .border_color(match checked {
                 true => theme.primary,

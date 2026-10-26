@@ -88,7 +88,7 @@ impl Database {
     pub fn standard() -> Self {
         let data = dirs::data_local_dir()
             .unwrap_or_else(std::env::temp_dir)
-            .join("sonora");
+            .join("digida");
         Self {
             path: data.join("state.sqlite"),
             ready: Arc::new(Mutex::new(false)),

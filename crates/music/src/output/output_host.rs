@@ -125,7 +125,7 @@ fn client() -> Option<pulseaudio::Client> {
     if !is_server(&host()) {
         return None;
     }
-    let client = pulseaudio::Client::from_env(c"Sonora")
+    let client = pulseaudio::Client::from_env(c"DIGIDA")
         .inspect_err(|error| log::debug!("output: cannot reach the sound server: {error}"))
         .ok()?;
     *shared = Some(client.clone());

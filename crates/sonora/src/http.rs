@@ -14,7 +14,7 @@ use gpui::http_client::{AsyncBody, HttpClient, Inner, Request, Response, Url};
 use sha2::{Digest, Sha256};
 use tokio::runtime::Handle;
 
-const USER_AGENT: &str = "sonora";
+const USER_AGENT: &str = "digida";
 const CACHE_BYTES: u64 = 128 * 1024 * 1024;
 const CACHE_AGE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 const CACHE_SWEEP: Duration = Duration::from_secs(60 * 60);
@@ -34,7 +34,7 @@ impl Client {
     pub fn new(handle: Handle) -> Self {
         let _guard = handle.enter();
         let cache = dirs::cache_dir()
-            .map(|root| root.join("sonora").join("images"))
+            .map(|root| root.join("digida").join("images"))
             .and_then(|root| match DiskCache::new(root, CACHE_BYTES, CACHE_AGE) {
                 Ok(cache) => Some(Arc::new(Mutex::new(cache))),
                 Err(error) => {

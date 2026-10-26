@@ -204,7 +204,7 @@ fn arrow(
         .bg(theme.secondary)
         .border_1()
         .border_color(theme.border)
-        .shadow_md()
+        .map(|this| crate::finish::raised(this, crate::finish::Depth::Mid, cx))
         .child(
             svg()
                 .path(icons::path(icon))

@@ -30,7 +30,7 @@ static MIGRATION: Once = Once::new();
 pub(crate) fn root() -> PathBuf {
     dirs::cache_dir()
         .unwrap_or_else(std::env::temp_dir)
-        .join("sonora")
+        .join("digida")
 }
 
 /// A provider's own accounts folder, named by its slug, under `$XDG_DATA_HOME/sonora/accounts`.
@@ -107,7 +107,7 @@ pub(crate) fn remove(path: &Path) {
 fn accounts() -> PathBuf {
     dirs::data_local_dir()
         .unwrap_or_else(std::env::temp_dir)
-        .join("sonora")
+        .join("digida")
         .join("accounts")
 }
 

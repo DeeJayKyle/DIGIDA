@@ -83,7 +83,7 @@ const START_SHARE: f32 = 0.3;
 /// How much of the card shows while Discord presence is disabled.
 const DIMMED: f32 = 0.4;
 /// What the status calls itself when the setting names Sonora, Discord's name for the app.
-const SONORA: &str = "Sonora";
+const SONORA: &str = "DIGIDA";
 
 /// What the Discord page's preview keeps between frames.
 pub(in crate::screens::settings) struct DiscordPreview {

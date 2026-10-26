@@ -135,6 +135,7 @@ fn main() {
             Theme::init(
                 Look {
                     kind: ThemeKind::Dark,
+                    finish: ui::Finish::Glass,
                     rounding: Rounding::Rounded,
                     font: 14.,
                     transparent: false,

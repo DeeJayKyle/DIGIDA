@@ -24,7 +24,7 @@ const PAGE: &str = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n\
 
 /// Libre.fm issues no API accounts, so the key and secret its protocol still asks for are ours
 /// and constant.
-const ANONYMOUS: &str = "sonora";
+const ANONYMOUS: &str = "digida";
 
 /// The last.fm 2.0 API. Libre.fm runs GNU FM, which answers the same methods at its own urls, so
 /// the two services are one type with different addresses.

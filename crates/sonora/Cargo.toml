@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[[bin]]
+name = "digida"
+path = "src/main.rs"
+
 [features]
 # the gpui frame overlay and repaint wash, off in normal builds
 profiler = ["gpui/profiler"]

@@ -1,12 +1,14 @@
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, Context, Div, Hsla, Pixels, SharedString, Window, div, px, relative, svg,
+    AnyElement, App, Context, Div, Hsla, Pixels, SharedString, Window, div, linear_color_stop,
+    linear_gradient, px, relative, svg,
 };
 use i18n::t;
 use state::SYSTEM_FONT;
+use ui::finish::{pressed_shadows, raised_shadows};
 use ui::{
-    ActiveTheme as _, Button, Look, MAX_FONT, MAX_TRANSPARENCY, MIN_FONT, MenuItem, OptionCard,
-    Picker, Rounding, Scrubber, Switch, Theme, ThemeKind,
+    ActiveTheme as _, Button, Depth, Finish, Look, MAX_FONT, MAX_TRANSPARENCY, MIN_FONT, MenuItem,
+    OptionCard, Picker, Rounding, Scrubber, Switch, Theme, ThemeKind,
 };
 
 use super::rows::grid;
@@ -15,6 +17,8 @@ use crate::shared::popups::matches_query;
 
 /// How large a pack's sample glyphs draw on its card.
 const SAMPLE: Pixels = px(14.);
+/// How many list rows a finish's thumbnail stands, tall enough to show a card and a control.
+const FINISH_ROWS: f32 = 3.;
 const TYPEFACE_LIMIT: usize = 200;
 const TYPEFACE_LEAD: usize = 2;
 /// How many faces are previewed before a row has been measured.
@@ -25,6 +29,7 @@ const TYPEFACE_BATCH: usize = 3;
 impl SettingsView {
     pub(super) fn appearance_groups(&self) -> Vec<Group> {
         vec![
+            Group::new("settings-finish", "icons/blend.svg").cards(Slot::Finish),
             Group::new("settings-theme", "icons/palette.svg")
                 .cards(Slot::Theme)
                 .rows([Slot::Adaptive]),
@@ -319,6 +324,40 @@ impl SettingsView {
             .into_any_element()
     }
 
+    /// One card per finish, each thumbnail a small scene drawn in that finish's own palette and
+    /// relief. Choosing one fades the palette over rather than cutting to it.
+    pub(super) fn finish_cards(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+        let look = self.look(cx);
+        let overrides = self.settings.read(cx).theme_overrides();
+        let height = cx.theme().metrics.list_row * FINISH_ROWS;
+
+        grid(Finish::ALL.len() as u16, window, cx)
+            .children(Finish::ALL.into_iter().map(|finish| {
+                let overrides = overrides.clone();
+                let preview = Theme::for_look(
+                    Look {
+                        finish,
+                        kind: look.kind.resolved(cx),
+                        ..look
+                    },
+                    &overrides,
+                );
+                OptionCard::new(finish.id())
+                    .thumb(finish_scene(&preview))
+                    .thumb_height(height)
+                    .label(finish.label())
+                    .selected(look.finish == finish)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.settings.update(cx, |settings, cx| {
+                            settings.set_finish(finish, cx);
+                        });
+                        Theme::fade(Look { finish, ..look }, &overrides, cx);
+                        cx.notify();
+                    }))
+            }))
+            .into_any_element()
+    }
+
     /// One card per corner rounding, its thumbnail the corner of a surface drawn at that radius.
     pub(super) fn corner_cards(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let look = self.look(cx);
@@ -475,6 +514,108 @@ pub(super) fn corner(rounding: Rounding, cx: &App) -> Div {
             .border_color(theme.muted_foreground)
             .bg(theme.secondary),
     )
+}
+
+/// A finish in miniature: its page, a raised card holding a cover and two lines of text, a
+/// primary pill and a pressed well, all in `theme`'s colours and relief. Glass sits over a
+/// colour field, since frosting a flat page shows nothing.
+fn finish_scene(theme: &Theme) -> Div {
+    let radius = theme.radius;
+    let pad = theme.metrics.pad;
+    let line = |width: f32, color: Hsla| {
+        div()
+            .h(pad * 0.4)
+            .w(relative(width))
+            .rounded_full()
+            .bg(color)
+    };
+    let glow = match theme.background.l < 0.5 {
+        true => 0.42,
+        false => 0.74,
+    };
+    let field = match theme.finish {
+        Finish::Glass => Some(linear_gradient(
+            135.,
+            linear_color_stop(gpui::hsla(0.75, 0.7, glow, 1.), 0.),
+            linear_color_stop(gpui::hsla(0.52, 0.7, glow, 1.), 1.),
+        )),
+        _ => None,
+    };
+
+    div()
+        .size_full()
+        .relative()
+        .bg(gpui::Hsla {
+            a: 1.,
+            ..theme.background
+        })
+        .when_some(field, |this, field| {
+            this.child(div().absolute().inset_0().bg(field))
+        })
+        .child(
+            div()
+                .absolute()
+                .inset_0()
+                .p(pad * 0.75)
+                .flex()
+                .flex_col()
+                .justify_between()
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(pad * 0.6)
+                        .p(pad * 0.6)
+                        .rounded(radius)
+                        .bg(ui::surface_fill(theme, theme.popover))
+                        .when(theme.finish == Finish::Glass, |this| {
+                            this.bg(theme.secondary)
+                                .backdrop_blur(ui::GLASS_BLUR)
+                                .border_1()
+                                .border_color(theme.border)
+                        })
+                        .shadow(raised_shadows(theme, Depth::Mid))
+                        .child(div().flex_none().size(pad * 2.75).rounded(radius * 0.6).bg(
+                            linear_gradient(
+                                150.,
+                                linear_color_stop(theme.primary, 0.),
+                                linear_color_stop(theme.primary.opacity(0.55), 1.),
+                            ),
+                        ))
+                        .child(
+                            div()
+                                .flex_1()
+                                .flex()
+                                .flex_col()
+                                .gap(pad * 0.3)
+                                .child(line(0.8, theme.foreground.opacity(0.85)))
+                                .child(line(0.5, theme.muted_foreground.opacity(0.7))),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap(pad * 0.5)
+                        .child(
+                            div()
+                                .h(pad * 1.25)
+                                .w(relative(0.45))
+                                .rounded_full()
+                                .bg(ui::surface_fill(theme, theme.primary))
+                                .shadow(raised_shadows(theme, Depth::Low)),
+                        )
+                        .child(
+                            div()
+                                .h(pad * 1.25)
+                                .w(relative(0.3))
+                                .rounded_full()
+                                .bg(theme.secondary)
+                                .shadow(pressed_shadows(theme, Depth::Low)),
+                        ),
+                ),
+        )
 }
 
 /// `content` in the middle of a thumbnail.

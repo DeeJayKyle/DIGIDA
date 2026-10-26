@@ -14,8 +14,8 @@ fn main() {
         println!("cargo:rerun-if-changed={icon}");
         let mut resource = winresource::WindowsResource::new();
         resource.set_icon(icon);
-        resource.set("ProductName", "Sonora");
-        resource.set("FileDescription", "Sonora");
+        resource.set("ProductName", "DIGIDA");
+        resource.set("FileDescription", "DIGIDA");
         if let Err(error) = resource.compile() {
             println!("cargo:warning=cannot embed the windows icon: {error}");
         }

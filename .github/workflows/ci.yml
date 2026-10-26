@@ -114,11 +114,11 @@ jobs:
           - target: x86_64-pc-windows-msvc
             os: windows-latest
             arch: x64compatible
-            setup: Sonora-Setup
+            setup: DIGIDA-Setup
           - target: aarch64-pc-windows-msvc
             os: windows-11-arm
             arch: arm64
-            setup: Sonora-Setup-arm64
+            setup: DIGIDA-Setup-arm64
     steps:
       - uses: actions/checkout@v5
 
@@ -159,7 +159,7 @@ jobs:
         continue-on-error: true
         uses: ./.github/actions/sign
         with:
-          file: target/${{ matrix.target }}/release/sonora.exe
+          file: target/${{ matrix.target }}/release/digida.exe
           artifact: unsigned-exe-${{ matrix.target }}
           policy: test-signing
           api-token: ${{ env.SIGNPATH_API_TOKEN }}
@@ -172,8 +172,8 @@ jobs:
           set -euo pipefail
           mkdir -p dist
           case "$RUNNER_OS" in
-            Windows) cp "target/$TARGET/release/sonora.exe" "dist/sonora-${GITHUB_SHA:0:7}-$TARGET.exe" ;;
-            *)       cp "target/$TARGET/release/sonora" "dist/sonora-${GITHUB_SHA:0:7}-$TARGET" ;;
+            Windows) cp "target/$TARGET/release/digida.exe" "dist/digida-${GITHUB_SHA:0:7}-$TARGET.exe" ;;
+            *)       cp "target/$TARGET/release/digida" "dist/digida-${GITHUB_SHA:0:7}-$TARGET" ;;
           esac
 
       - name: install Inno Setup
@@ -186,13 +186,13 @@ jobs:
         shell: pwsh
         env:
           TARGET: ${{ matrix.target }}
-          SONORA_ARCH: ${{ matrix.arch }}
-          SONORA_SETUP: ${{ matrix.setup }}
+          DIGIDA_ARCH: ${{ matrix.arch }}
+          DIGIDA_SETUP: ${{ matrix.setup }}
         run: |
-          $env:SONORA_VERSION = "0.0.0"
-          $env:SONORA_EXE = (Resolve-Path "target/$env:TARGET/release/sonora.exe").Path
-          $env:SONORA_DIST = (Resolve-Path "dist").Path
-          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "scripts/windows/sonora.iss"
+          $env:DIGIDA_VERSION = "0.0.0"
+          $env:DIGIDA_EXE = (Resolve-Path "target/$env:TARGET/release/digida.exe").Path
+          $env:DIGIDA_DIST = (Resolve-Path "dist").Path
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "scripts/windows/digida.iss"
 
       - name: sign the installer
         if: runner.os == 'Windows' && github.event_name == 'workflow_dispatch' && env.SIGNPATH_API_TOKEN != ''

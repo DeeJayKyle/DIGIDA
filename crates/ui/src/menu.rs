@@ -1077,7 +1077,7 @@ impl RenderOnce for Menu {
             .gap_1()
             .border_color(theme.border)
             .bg(fill)
-            .shadow_md()
+            .map(|this| crate::finish::raised(this, crate::finish::Depth::High, cx))
             .text_color(theme.popover_foreground)
             .key_context(MENU_CONTEXT)
             .when_some(keys, |this, keys| keys.bind(this))

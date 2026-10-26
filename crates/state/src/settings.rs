@@ -33,7 +33,8 @@ use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use storage::Database;
 use ui::{
-    Layout, Look, Mode, Pace, Pin, Rounding, Saver, Sorting, Stillness, ThemeKind, ThemeOverrides,
+    Finish, Layout, Look, Mode, Pace, Pin, Rounding, Saver, Sorting, Stillness, ThemeKind,
+    ThemeOverrides,
 };
 
 use self::equalizer::Profile;
@@ -487,6 +488,8 @@ struct Appearance {
     player_bar_layout: String,
     player_bar_transparent: bool,
     icons: String,
+    /// The material surfaces are drawn in, by `ui::Finish` id.
+    finish: String,
     rounding: String,
     /// Whether the app paints its frosted treatments. The key kept its old name, which stood
     /// for a blurred desktop behind the window, so a stored preference carries over.
@@ -779,6 +782,7 @@ impl Default for Appearance {
             player_bar_layout: PlayerBarLayout::default().id().to_owned(),
             player_bar_transparent: true,
             icons: icons::BASE.to_owned(),
+            finish: Finish::default().id().to_owned(),
             rounding: Rounding::Rounded.id().to_owned(),
             blur: true,
             blur_window: true,
@@ -1306,6 +1310,11 @@ impl AppSettings {
         &self.values.appearance.rounding
     }
 
+    /// The material surfaces are drawn in.
+    pub fn finish(&self) -> Finish {
+        Finish::from_id(&self.values.appearance.finish)
+    }
+
     /// Whether the app paints its frosted treatments. See `ui::blurring`.
     pub fn blur(&self) -> bool {
         self.values.appearance.blur
@@ -1339,6 +1348,7 @@ impl AppSettings {
     pub fn look(&self) -> Look {
         Look {
             kind: ThemeKind::from_id(self.theme()),
+            finish: self.finish(),
             rounding: Rounding::from_id(self.rounding()),
             font: self.font_size(),
             transparent: self.transparent(),
@@ -2027,6 +2037,11 @@ impl AppSettings {
         icons::set(&pack);
         self.values.appearance.icons = pack;
         cx.refresh_windows();
+        self.schedule_save(cx);
+    }
+
+    pub fn set_finish(&mut self, finish: Finish, cx: &mut Context<Self>) {
+        self.values.appearance.finish = finish.id().to_owned();
         self.schedule_save(cx);
     }
 
@@ -2729,7 +2744,7 @@ fn write_settings(path: &Path, bytes: &[u8]) -> Result<()> {
 fn settings_path() -> PathBuf {
     dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("sonora")
+        .join("digida")
         .join("settings.json")
 }
 

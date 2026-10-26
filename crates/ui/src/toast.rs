@@ -332,8 +332,8 @@ impl RenderOnce for Toast {
             .rounded(corners(theme.radius))
             .border(BORDER)
             .border_color(theme.border)
-            .bg(theme.popover)
-            .shadow_lg()
+            .bg(crate::finish::surface_fill(&theme, theme.popover))
+            .map(|this| crate::finish::raised(this, crate::finish::Depth::High, cx))
             .text_size(theme.text(Text::Label))
             .text_color(theme.popover_foreground)
             .child(contents);

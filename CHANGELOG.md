@@ -7,6 +7,27 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-10-26
+
+The first release of DIGIDA, a fork of Sonora 0.44.2.
+
+### Added
+
+- Choose how the whole app is drawn under Settings → Appearance → Style: Glass, Clay,
+  Skeuomorphic or Neumorphic. Each one works with every theme, and the adaptive theme tints it
+  from the cover that is playing.
+- Glass sets frosted panes over a slowly drifting aurora that takes the cover's colours when the
+  adaptive theme is on.
+- Clay and Neumorphic give buttons, switches, fields, tabs and cards real depth: they stand out
+  of the page, rise when hovered and press in when chosen.
+- Skeuomorphic draws lit gradients, bevelled edges and a paper grain over the page.
+- Switching style fades the palette over and settles the window into the new material.
+
+### Changed
+
+- Sonora is now DIGIDA. It keeps its settings, sign-ins and downloads in a folder of its own, so
+  it installs beside Sonora rather than over it, and it checks DIGIDA's releases for updates.
+
 ## [0.44.2] - 2026-10-25
 
 ### Fixed
@@ -2324,7 +2345,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Initial release: a native Spotify client with playback, an interactive queue, the saved library,
 search, album, playlist, artist and song pages, context menus and adaptive theming.
 
-[unreleased]: https://github.com/sonorahq/sonora/compare/v0.44.2...HEAD
+[unreleased]: https://github.com/DeeJayKyle/DIGIDA/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/DeeJayKyle/DIGIDA/releases/tag/v1.0.0
 [0.44.2]: https://github.com/sonorahq/sonora/compare/v0.44.1...v0.44.2
 [0.44.1]: https://github.com/sonorahq/sonora/compare/v0.44.0...v0.44.1
 [0.44.0]: https://github.com/sonorahq/sonora/compare/v0.43.0...v0.44.0

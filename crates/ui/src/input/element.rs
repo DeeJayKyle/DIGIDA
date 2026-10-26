@@ -325,6 +325,11 @@ impl Render for Input {
                 _ => this.bg(theme.secondary),
             })
             .when(self.blurred, |this| this.shadow_sm())
+            // a field is a well pressed into the page wherever the finish has relief to give
+            .when(
+                !self.blurred && !self.tucked && cx.theme().finish != crate::Finish::Glass,
+                |this| crate::finish::pressed(this, crate::finish::Depth::Low, cx),
+            )
             .when_else(
                 self.tucked,
                 |this| this.w_full(),
