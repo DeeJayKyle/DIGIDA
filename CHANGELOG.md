@@ -7,6 +7,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Spicy Lyrics can supply word-by-word lyrics once you add your own key in Settings → Lyrics.
+
 ### Changed
 
 - When Spotify refuses to play on your account, a Why? button opens the FAQ explaining it.

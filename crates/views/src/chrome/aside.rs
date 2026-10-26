@@ -19,10 +19,10 @@ use state::{
     Shelf, SideTab, Sonora, Steered, Whence,
 };
 use ui::{
-    ActiveTheme as _, Avatar, Button, Card, DraggedPin, Edge, Initials, Motion, Motioned as _,
-    PREFETCH_REACH, Pin, Pinnable as _, Popup, Scrollbar, Scroller, Spot, Springs, Tails as _,
-    Text, Vacancy, drop_gap, drop_marker, ease_out_cubic, ease_out_expo, eyebrow, faint, mix,
-    prefetch, snapped, vacant,
+    ActiveTheme as _, Avatar, Button, Card, DraggedPin, Edge, Initials, InlineLink, InlineLinks,
+    Motion, Motioned as _, PREFETCH_REACH, Pin, Pinnable as _, Popup, Scrollbar, Scroller, Spot,
+    Springs, Tails as _, Text, Vacancy, drop_gap, drop_marker, ease_out_cubic, ease_out_expo,
+    eyebrow, faint, mix, prefetch, snapped, vacant,
 };
 use unicode_bidi::{BidiClass, Direction};
 
@@ -320,9 +320,13 @@ struct RowLook {
 /// in, since the sheet redraws every frame while a song plays.
 struct Credit {
     source: &'static str,
+    origin: Option<String>,
     writers: Vec<String>,
+    contributors: Vec<music::LyricsContributor>,
     language: i18n::Language,
     lines: (SharedString, Option<SharedString>),
+    /// One line per contributor to a community sheet, with the page it links to.
+    people: Vec<InlineLink>,
 }
 
 /// What the height of a settled lyrics row depends on besides its own words. A row off screen is
@@ -1174,15 +1178,20 @@ impl Aside {
             let language = i18n::language();
             let fresh = self.credit.as_ref().is_some_and(|credit| {
                 credit.source == hit.source
+                    && credit.origin == hit.origin
                     && credit.writers == hit.writers
+                    && credit.contributors == hit.contributors
                     && credit.language == language
             });
             if !fresh {
                 self.credit = Some(Credit {
                     source: hit.source,
+                    origin: hit.origin.clone(),
                     writers: hit.writers.clone(),
+                    contributors: hit.contributors.clone(),
                     language,
-                    lines: credit_lines(hit.source, &hit.writers),
+                    lines: credit_lines(hit.source, hit.origin.as_deref(), &hit.writers),
+                    people: credit_people(&hit.contributors),
                 });
             }
         }
@@ -1738,7 +1747,10 @@ impl Aside {
 
         if state == LyricsState::Ready
             && shown
-            && let Some((from, by)) = self.credit.as_ref().map(|credit| credit.lines.clone())
+            && let Some(((from, by), people)) = self
+                .credit
+                .as_ref()
+                .map(|credit| (credit.lines.clone(), credit.people.clone()))
         {
             let credit = body.len();
             let along = viewport_along(&scroll, credit, scroll.bounds(), drag.downward);
@@ -1758,7 +1770,16 @@ impl Aside {
                 .text_size(theme.text(Text::Small))
                 .text_color(theme.muted_foreground)
                 .child(from)
-                .children(by);
+                .children(by)
+                .children(people.into_iter().enumerate().map(|(index, person)| {
+                    InlineLinks::new(
+                        SharedString::from(format!("lyrics-credit-{index}")),
+                        [person],
+                        SharedString::default(),
+                        theme.muted_foreground,
+                    )
+                    .on_click(|url, cx| cx.open_url(&url))
+                }));
             body.push(adrift(note, translation, false, window));
         }
         if drifting {
@@ -2649,17 +2670,39 @@ fn selected_romanization(
         .then(|| romanized.text.clone())
 }
 
-/// Which source a sheet came from and, when it names them, who wrote the song.
-fn credit_lines(source: &str, writers: &[String]) -> (SharedString, Option<SharedString>) {
-    let from = match source == music::lyrics::LOCAL {
-        true => t!("lyrics-source-local"),
-        false => t!("lyrics-source", source = source),
+/// Which source a sheet came from, and the catalogue it relayed when there is one, and when it
+/// names them, who wrote the song.
+fn credit_lines(
+    source: &str,
+    origin: Option<&str>,
+    writers: &[String],
+) -> (SharedString, Option<SharedString>) {
+    let from = match (source == music::lyrics::LOCAL, origin) {
+        (true, _) => t!("lyrics-source-local"),
+        (false, None) => t!("lyrics-source", source = source),
+        (false, Some("")) => t!("lyrics-source-relayed-unknown", source = source),
+        (false, Some(origin)) => t!("lyrics-source-relayed", origin = origin, source = source),
     };
     let by = (!writers.is_empty()).then(|| {
         let writers = writers.join(", ");
         t!("lyrics-writers", writers = writers.as_str())
     });
     (from, by)
+}
+
+/// The people credited for a community sheet, each a line that links to their page.
+fn credit_people(contributors: &[music::LyricsContributor]) -> Vec<InlineLink> {
+    contributors
+        .iter()
+        .map(|person| {
+            let name = person.name.as_str();
+            let label = match person.role {
+                music::LyricsRole::Maker => t!("lyrics-maker", name = name),
+                music::LyricsRole::Uploader => t!("lyrics-uploader", name = name),
+            };
+            InlineLink::new(label, person.url.clone().map(SharedString::from))
+        })
+        .collect()
 }
 
 /// A fingerprint of a font name, so the sheet notices a change of font without keeping a copy.
