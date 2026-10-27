@@ -47,6 +47,7 @@ import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.material.icons.rounded.Pause
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Refresh
+import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.Shuffle
 import androidx.compose.material.icons.rounded.SkipNext
@@ -83,6 +84,8 @@ import uniffi.digida_mobile.Status
 sealed interface Route {
     data object Home : Route
     data class Album(val release: Release) : Route
+    data class Playlist(val playlist: uniffi.digida_mobile.Playlist) : Route
+    data object Search : Route
     data object Settings : Route
 }
 
@@ -121,9 +124,18 @@ fun App(library: Library, preferences: Preferences) {
                     Route.Home -> HomeScreen(
                         library,
                         onAlbum = { stack.add(Route.Album(it)) },
+                        onPlaylist = { stack.add(Route.Playlist(it)) },
+                        onSearch = { stack.add(Route.Search) },
                         onSettings = { stack.add(Route.Settings) },
                     )
                     is Route.Album -> AlbumScreen(library, route.release, onBack = { stack.removeAt(stack.lastIndex) })
+                    is Route.Playlist -> PlaylistScreen(library, route.playlist, onBack = { stack.removeAt(stack.lastIndex) })
+                    Route.Search -> {
+                        val status by library.status.collectAsStateWithLifecycle()
+                        SearchScreen(library, onBack = { stack.removeAt(stack.lastIndex) }) { songs, index ->
+                            SongRow(songs[index], playing = status.song?.id == songs[index].id) { library.play(songs, index) }
+                        }
+                    }
                     Route.Settings -> SettingsScreen(library, preferences, onBack = { stack.removeAt(stack.lastIndex) })
                 }
             }
@@ -142,6 +154,7 @@ fun App(library: Library, preferences: Preferences) {
         ) {
             PlayerScreen(status, library, onClose = { expanded = false })
         }
+        SignInPrompts(library)
     }
 }
 
@@ -166,27 +179,43 @@ private fun TopBar(
 }
 
 @Composable
-private fun HomeScreen(library: Library, onAlbum: (Release) -> Unit, onSettings: () -> Unit) {
+private fun HomeScreen(
+    library: Library,
+    onAlbum: (Release) -> Unit,
+    onPlaylist: (uniffi.digida_mobile.Playlist) -> Unit,
+    onSearch: () -> Unit,
+    onSettings: () -> Unit,
+) {
     val palette = LocalPalette.current
     val shelf by library.shelf.collectAsStateWithLifecycle()
+    val active by library.active.collectAsStateWithLifecycle()
     var tab by remember { mutableStateOf(0) }
 
     Column(Modifier.fillMaxSize()) {
         TopBar(stringResource(R.string.library)) {
+            if (active != Library.LOCAL) {
+                IconPill(Icons.Rounded.Search, stringResource(R.string.search), onSearch, size = 40.dp)
+                Spacer(Modifier.width(10.dp))
+            }
             IconPill(Icons.Rounded.Settings, stringResource(R.string.settings), onSettings, size = 40.dp)
         }
+        ServiceChips(library, Modifier.padding(bottom = 12.dp))
         Segmented(
-            listOf(stringResource(R.string.albums), stringResource(R.string.songs)),
+            listOf(stringResource(R.string.albums), stringResource(R.string.songs), stringResource(R.string.playlists)),
             tab,
             onSelect = { tab = it },
             modifier = Modifier.padding(horizontal = 18.dp),
         )
         Spacer(Modifier.height(10.dp))
         when {
-            shelf.scanning && shelf.albums.isEmpty() -> Message(stringResource(R.string.scanning), null)
-            shelf.albums.isEmpty() && shelf.songs.isEmpty() ->
+            shelf.loading && shelf.albums.isEmpty() && shelf.songs.isEmpty() -> Message(
+                stringResource(if (active == Library.LOCAL) R.string.scanning else R.string.loading),
+                null,
+            )
+            shelf.albums.isEmpty() && shelf.songs.isEmpty() && shelf.playlists.isEmpty() ->
                 Message(stringResource(R.string.empty_title), shelf.error ?: stringResource(R.string.empty_detail))
             tab == 0 -> AlbumGrid(shelf.albums, onAlbum)
+            tab == 2 -> PlaylistGrid(shelf.playlists, onPlaylist)
             else -> SongList(shelf.songs, library, header = {
                 Pressable(
                     onClick = { library.play(shelf.songs.shuffled(), 0) },
@@ -317,7 +346,7 @@ private fun SongList(songs: List<Song>, library: Library, header: @Composable ()
 }
 
 @Composable
-private fun SongRow(song: Song, playing: Boolean, onClick: () -> Unit) {
+internal fun SongRow(song: Song, playing: Boolean, onClick: () -> Unit) {
     val palette = LocalPalette.current
     Pressable(
         onClick = onClick,
@@ -361,6 +390,36 @@ private fun AlbumScreen(library: Library, release: Release, onBack: () -> Unit) 
                     listOfNotNull(release.artist, release.year.takeIf { it > 0 }?.toString()).joinToString(" · "),
                     subtle = true,
                 )
+                Spacer(Modifier.height(16.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                    IconPill(Icons.Rounded.PlayArrow, stringResource(R.string.play), { library.play(songs, 0) }, size = 56.dp, accent = true)
+                    IconPill(Icons.Rounded.Shuffle, stringResource(R.string.shuffle), { library.play(songs.shuffled(), 0) }, size = 56.dp)
+                }
+                Spacer(Modifier.height(12.dp))
+            }
+        })
+    }
+}
+
+@Composable
+private fun PlaylistScreen(library: Library, playlist: uniffi.digida_mobile.Playlist, onBack: () -> Unit) {
+    val palette = LocalPalette.current
+    var songs by remember { mutableStateOf<List<Song>>(emptyList()) }
+    LaunchedEffect(playlist.id) { songs = runCatching { library.playlistSongs(playlist) }.getOrDefault(emptyList()) }
+
+    Column(Modifier.fillMaxSize()) {
+        TopBar("", onBack = onBack)
+        SongList(songs, library, header = {
+            Column(
+                Modifier.fillMaxWidth().padding(horizontal = 18.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                Box(Modifier.size(220.dp).surface(palette, Depth.High, fill = palette.raised)) {
+                    Cover(playlist.cover, playlist.title, Modifier.fillMaxSize(), radius = palette.radius)
+                }
+                Spacer(Modifier.height(18.dp))
+                Label(playlist.title, size = 24.sp, weight = FontWeight.Bold, lines = 2)
+                Label(playlist.owner, subtle = true)
                 Spacer(Modifier.height(16.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
                     IconPill(Icons.Rounded.PlayArrow, stringResource(R.string.play), { library.play(songs, 0) }, size = 56.dp, accent = true)
@@ -572,6 +631,8 @@ private fun SettingsScreen(library: Library, preferences: Preferences, onBack: (
                     onSelect = { preferences.setMode(Mode.entries[it]) },
                 )
             }
+            item { Heading(stringResource(R.string.accounts), stringResource(R.string.accounts_detail)) }
+            item { Accounts(library) }
             item { Heading(stringResource(R.string.folders), stringResource(R.string.folders_detail)) }
             itemsIndexed(folders) { _, folder ->
                 Row(

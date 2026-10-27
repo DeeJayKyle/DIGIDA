@@ -14,14 +14,19 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import uniffi.digida_mobile.Digida
 import uniffi.digida_mobile.Listener
+import uniffi.digida_mobile.Method
 import uniffi.digida_mobile.PlayState
+import uniffi.digida_mobile.Playlist
+import uniffi.digida_mobile.Prompt
 import uniffi.digida_mobile.Release
+import uniffi.digida_mobile.Service
 import uniffi.digida_mobile.Song
 import uniffi.digida_mobile.Status
 
-/** The process: one Rust core, the library it scanned and the playback status it reports. */
+/** The process: one Rust core, the library it shows and the playback status it reports. */
 class DigidaApp : Application() {
     lateinit var library: Library
         private set
@@ -35,13 +40,17 @@ class DigidaApp : Application() {
     }
 }
 
-/** What the library screens draw from. */
+/** What the library screens draw from, for the service they show. */
 data class Shelf(
-    val scanning: Boolean = false,
+    val loading: Boolean = false,
     val albums: List<Release> = emptyList(),
     val songs: List<Song> = emptyList(),
+    val playlists: List<Playlist> = emptyList(),
     val error: String? = null,
 )
+
+/** A sign-in waiting on the listener: which service asked, and what it asked for. */
+data class Asking(val service: String, val prompt: Prompt)
 
 /**
  * The Rust core and the state the screens observe. Library calls block in Rust, so they run on
@@ -60,6 +69,22 @@ class Library(private val context: Context, private val preferences: Preferences
     private val _status = MutableStateFlow(core.status())
     val status: StateFlow<Status> = _status.asStateFlow()
 
+    private val _services = MutableStateFlow(core.services())
+    val services: StateFlow<List<Service>> = _services.asStateFlow()
+
+    private val _active = MutableStateFlow(LOCAL)
+    val active: StateFlow<String> = _active.asStateFlow()
+
+    private val _asking = MutableStateFlow<Asking?>(null)
+    val asking: StateFlow<Asking?> = _asking.asStateFlow()
+
+    /** The service a sign-in is running for, while one is. */
+    private val _signing = MutableStateFlow<String?>(null)
+    val signing: StateFlow<String?> = _signing.asStateFlow()
+
+    private val _problem = MutableStateFlow<String?>(null)
+    val problem: StateFlow<String?> = _problem.asStateFlow()
+
     init {
         core.setListener(object : Listener {
             override fun changed(status: Status) {
@@ -69,26 +94,106 @@ class Library(private val context: Context, private val preferences: Preferences
                     PlaybackService.start(context)
                 }
             }
+
+            override fun prompt(provider: String, prompt: Prompt) {
+                _asking.value = Asking(provider, prompt)
+            }
         })
+        scope.launch {
+            core.restore()
+            _services.value = core.services()
+        }
     }
 
     /** Scans the chosen folders, or the phone's Music and Download folders when none are. */
     fun scan() {
-        if (_shelf.value.scanning) return
-        _shelf.value = _shelf.value.copy(scanning = true, error = null)
+        scope.launch { rescan() }
+    }
+
+    private fun rescan() {
+        _shelf.value = _shelf.value.copy(loading = true, error = null)
+        val failed = runCatching { core.scan(preferences.folders.ifEmpty { defaultFolders() }) }
+            .exceptionOrNull()
+        _services.value = core.services()
+        if (_active.value == LOCAL) load() else if (failed != null) {
+            _shelf.value = _shelf.value.copy(loading = false, error = failed.message)
+        }
+    }
+
+    /** Shows `slug`'s library on the library screens and loads it. */
+    fun show(slug: String) {
+        if (_active.value == slug && _shelf.value.error == null && !_shelf.value.loading) return
+        _active.value = slug
+        core.setActive(slug)
+        _shelf.value = Shelf(loading = true)
+        scope.launch { load() }
+    }
+
+    /** Loads the shown library's albums, songs and playlists. A part that fails is left empty. */
+    private fun load() {
+        _shelf.value = _shelf.value.copy(loading = true, error = null)
+        val albums = runCatching { core.albums() }
+        val songs = runCatching { core.songs() }
+        val playlists = runCatching { core.playlists() }
+        _shelf.value = Shelf(
+            albums = albums.getOrDefault(emptyList()),
+            songs = songs.getOrDefault(emptyList()),
+            playlists = playlists.getOrDefault(emptyList()),
+            error = listOf(albums, songs).firstNotNullOfOrNull { it.exceptionOrNull()?.message },
+        )
+    }
+
+    /**
+     * Signs in to `slug`. Prompts arrive on [asking]; once it is done the app comes back to the
+     * front, closing the browser tab the sign-in may have opened, and shows that library.
+     */
+    fun signIn(slug: String, method: Method) {
+        if (_signing.value != null) return
+        _signing.value = slug
+        _problem.value = null
         scope.launch {
-            _shelf.value = try {
-                core.scan(preferences.folders.ifEmpty { defaultFolders() })
-                Shelf(albums = core.albums(), songs = core.songs())
-            } catch (error: Exception) {
-                _shelf.value.copy(scanning = false, error = error.message)
+            val failed = runCatching { core.signIn(slug, method) }.exceptionOrNull()
+            _asking.value = null
+            _signing.value = null
+            _services.value = core.services()
+            if (failed != null) {
+                _problem.value = failed.message
+            } else {
+                context.startActivity(
+                    Intent(context, MainActivity::class.java)
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                )
+                show(slug)
             }
         }
     }
 
-    /** The songs of one album, in order. */
-    suspend fun albumSongs(album: Release): List<Song> =
-        kotlinx.coroutines.withContext(Dispatchers.IO) { core.albumSongs(album.id) }
+    /** Answers the prompt the running sign-in raised. */
+    fun answer(text: String) {
+        _asking.value = null
+        core.answer(text)
+    }
+
+    fun cancelSignIn() {
+        val slug = _signing.value ?: return
+        _asking.value = null
+        core.cancelSignIn(slug)
+    }
+
+    fun signOut(slug: String) {
+        core.signOut(slug)
+        _services.value = core.services()
+        if (_active.value == slug) show(LOCAL)
+    }
+
+    fun dismissProblem() {
+        _problem.value = null
+    }
+
+    suspend fun albumSongs(album: Release): List<Song> = withContext(Dispatchers.IO) { core.albumSongs(album.id) }
+    suspend fun playlistSongs(playlist: Playlist): List<Song> =
+        withContext(Dispatchers.IO) { core.playlistSongs(playlist.id) }
+    suspend fun search(query: String): List<Song> = withContext(Dispatchers.IO) { core.search(query) }
 
     fun play(songs: List<Song>, start: Int) = core.play(songs, start.toUInt())
     fun toggle() = core.toggle()
@@ -100,6 +205,10 @@ class Library(private val context: Context, private val preferences: Preferences
         Environment.DIRECTORY_MUSIC,
         Environment.DIRECTORY_DOWNLOADS,
     ).map { Environment.getExternalStoragePublicDirectory(it).path }
+
+    companion object {
+        const val LOCAL = "local"
+    }
 }
 
 /** The choices the app keeps between launches. */
