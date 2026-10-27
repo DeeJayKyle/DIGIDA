@@ -4438,6 +4438,7 @@ dependencies = [
  "jni",
  "log",
  "music",
+ "ndk-context",
  "rquickjs-sys",
  "rustls-platform-verifier",
  "storage",

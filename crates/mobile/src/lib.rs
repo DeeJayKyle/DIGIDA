@@ -838,9 +838,10 @@ fn list(playlist: Listing) -> Playlist {
     }
 }
 
-/// Hands the certificate verifier the app's context, so every HTTPS connection the core makes
-/// is checked against the phone's own trust store. Called once from `Tls.init` in Kotlin,
-/// before anything reaches the network.
+/// Registers the app with the parts of the core that call back into Android: the audio output,
+/// which finds the phone's speakers through the process's context, and the certificate
+/// verifier, which checks every HTTPS connection against the phone's own trust store. Called
+/// once per process from `Tls.init` in Kotlin, before anything plays or reaches the network.
 #[cfg(target_os = "android")]
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_io_github_deejaykyle_digida_Tls_init<'local>(
@@ -849,6 +850,14 @@ pub extern "system" fn Java_io_github_deejaykyle_digida_Tls_init<'local>(
     context: jni::objects::JObject<'local>,
 ) {
     env.with_env(|env| -> jni::errors::Result<()> {
+        let vm = env.get_java_vm()?;
+        // The global reference is never released: the context has to outlive every audio
+        // stream, and the process is what ends it.
+        let app = env.new_global_ref(&context)?.into_raw();
+        // SAFETY: both pointers are valid for the life of the process, the VM because there is
+        // one per process and the context because its global reference is never deleted, and
+        // this runs once, before anything reads the context.
+        unsafe { ndk_context::initialize_android_context(vm.get_raw().cast(), app.cast()) };
         rustls_platform_verifier::android::init_with_env(env, context)
     })
     .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
