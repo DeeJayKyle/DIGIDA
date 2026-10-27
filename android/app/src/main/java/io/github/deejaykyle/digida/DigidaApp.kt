@@ -36,9 +36,19 @@ class DigidaApp : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        Tls.init(this)
         preferences = Preferences(this)
         library = Library(this, preferences)
     }
+}
+
+/** The core's HTTPS certificate checks, which read the phone's trust store through the app. */
+object Tls {
+    init {
+        System.loadLibrary("digida_mobile")
+    }
+
+    external fun init(context: Context)
 }
 
 /** What the library screens draw from, for the service they show. */

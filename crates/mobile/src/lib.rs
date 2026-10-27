@@ -838,6 +838,22 @@ fn list(playlist: Listing) -> Playlist {
     }
 }
 
+/// Hands the certificate verifier the app's context, so every HTTPS connection the core makes
+/// is checked against the phone's own trust store. Called once from `Tls.init` in Kotlin,
+/// before anything reaches the network.
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_github_deejaykyle_digida_Tls_init<'local>(
+    mut env: jni::EnvUnowned<'local>,
+    _class: jni::objects::JClass<'local>,
+    context: jni::objects::JObject<'local>,
+) {
+    env.with_env(|env| -> jni::errors::Result<()> {
+        rustls_platform_verifier::android::init_with_env(env, context)
+    })
+    .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
 /// Locks a mutex, taking it over from a thread that panicked while holding it.
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex

@@ -23,3 +23,6 @@ android_logger.workspace = true
 # The JavaScript engine YouTube Music's player runs in ships no prebuilt bindings for Android,
 # so they are generated from its headers at build time.
 rquickjs-sys = { workspace = true, features = ["bindgen"] }
+# HTTPS checks certificates against the phone's own trust store, which needs the app's context.
+jni.workspace = true
+rustls-platform-verifier.workspace = true

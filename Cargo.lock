@@ -4435,9 +4435,11 @@ version = "1.0.0"
 dependencies = [
  "android_logger",
  "anyhow",
+ "jni",
  "log",
  "music",
  "rquickjs-sys",
+ "rustls-platform-verifier",
  "storage",
  "tokio",
  "uniffi",
