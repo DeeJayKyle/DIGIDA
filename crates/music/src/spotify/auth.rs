@@ -3,7 +3,7 @@ use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{Context as _, Result, anyhow};
+use anyhow::{Context as _, Result};
 
 use crate::spotify::offline;
 use crate::vault::Vault;
@@ -182,7 +182,9 @@ fn authorize(client_id: &str, redirect_uri: &str, prompt: PromptSink) -> Result<
         .exchange_code(AuthorizationCode::new(code.to_string()))
         .set_pkce_verifier(verifier)
         .request(&exchange)
-        .map_err(|error| anyhow!("failed to exchange Spotify authorization code: {error}"))?;
+        .map_err(|error| {
+            anyhow::Error::new(error).context("failed to exchange Spotify authorization code")
+        })?;
     Ok(response.access_token().secret().to_owned())
 }
 

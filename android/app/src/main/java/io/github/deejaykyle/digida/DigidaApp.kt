@@ -58,6 +58,8 @@ data class Shelf(
     val songs: List<Song> = emptyList(),
     val playlists: List<Playlist> = emptyList(),
     val error: String? = null,
+    /** The service is signed in as a guest, which has no library to list, only search. */
+    val guest: Boolean = false,
 )
 
 /** A sign-in waiting on the listener: which service asked, and what it asked for. */
@@ -136,6 +138,11 @@ class Library(private val context: Context, private val preferences: Preferences
         if (_active.value == slug && _shelf.value.error == null && !_shelf.value.loading) return
         _active.value = slug
         core.setActive(slug)
+        val guest = slug != LOCAL && _services.value.any { it.slug == slug && it.signedIn && !it.authenticated }
+        if (guest) {
+            _shelf.value = Shelf(guest = true)
+            return
+        }
         _shelf.value = Shelf(loading = true)
         scope.launch { load() }
     }

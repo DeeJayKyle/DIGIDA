@@ -162,7 +162,7 @@ fun Field(
 
 /** Search across the shown service, playing a result with the rest of the results after it. */
 @Composable
-fun SearchScreen(library: Library, onBack: () -> Unit, songRow: @Composable (List<Song>, Int) -> Unit) {
+fun SearchScreen(library: Library, onBack: (() -> Unit)?, songRow: @Composable (List<Song>, Int) -> Unit) {
     val scope = rememberCoroutineScope()
     var query by remember { mutableStateOf("") }
     var results by remember { mutableStateOf<List<Song>>(emptyList()) }
@@ -179,8 +179,10 @@ fun SearchScreen(library: Library, onBack: () -> Unit, songRow: @Composable (Lis
 
     Column(Modifier.fillMaxSize()) {
         Row(Modifier.padding(horizontal = 18.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-            IconPill(Icons.AutoMirrored.Rounded.ArrowBack, stringResource(R.string.back), onBack, size = 40.dp)
-            Spacer(Modifier.width(12.dp))
+            if (onBack != null) {
+                IconPill(Icons.AutoMirrored.Rounded.ArrowBack, stringResource(R.string.back), onBack, size = 40.dp)
+                Spacer(Modifier.width(12.dp))
+            }
             Field(query, { query = it }, stringResource(R.string.search_hint), Modifier.weight(1f), onDone = { run() })
         }
         if (busy) Label(stringResource(R.string.searching), Modifier.padding(18.dp), subtle = true)

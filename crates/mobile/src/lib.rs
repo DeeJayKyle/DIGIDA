@@ -111,6 +111,9 @@ pub struct Service {
     pub stored: bool,
     pub methods: Vec<Method>,
     pub account: Option<String>,
+    /// Whether the session is an account's rather than a guest's, which has no library of its
+    /// own to list, only search.
+    pub authenticated: bool,
 }
 
 /// How to catch a provider's sign-in cookies in a web view: open `url`, and once the cookies
@@ -221,6 +224,8 @@ impl Digida {
     #[uniffi::constructor]
     pub fn new(data_dir: String, cache_dir: String) -> Result<Arc<Self>, MobileError> {
         logging();
+        #[cfg(target_os = "android")]
+        trust(std::path::Path::new(&cache_dir));
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .thread_name("digida-core")
@@ -326,6 +331,10 @@ impl Digida {
                     .session
                     .as_ref()
                     .map(|session| session.profile.display_name.clone()),
+                authenticated: slot
+                    .session
+                    .as_ref()
+                    .is_some_and(|session| session.authenticated),
             })
             .collect();
         services.sort_by_key(|service| (service.slug != LOCAL, service.name.clone()));
@@ -861,6 +870,42 @@ pub extern "system" fn Java_io_github_deejaykyle_digida_Tls_init<'local>(
         rustls_platform_verifier::android::init_with_env(env, context)
     })
     .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
+/// Gathers the phone's trusted certificates into one file and points `SSL_CERT_FILE` at it.
+/// Spotify's client looks for certificates where a Linux system keeps them, and Android keeps
+/// them elsewhere, one file per certificate: in the Conscrypt module since Android 14, and under
+/// `/system` before it. A certificate file holds its PEM block beside a text dump, which the
+/// readers skip.
+#[cfg(target_os = "android")]
+fn trust(cache: &std::path::Path) {
+    let stores = [
+        "/apex/com.android.conscrypt/cacerts",
+        "/system/etc/security/cacerts",
+    ];
+    let Some(entries) = stores
+        .iter()
+        .find_map(|store| std::fs::read_dir(store).ok())
+    else {
+        log::warn!("mobile: the phone names no trusted certificates");
+        return;
+    };
+    let mut bundle = Vec::new();
+    for entry in entries.flatten() {
+        if let Ok(certificate) = std::fs::read(entry.path()) {
+            bundle.extend_from_slice(&certificate);
+            bundle.push(b'\n');
+        }
+    }
+    let path = cache.join("ca-bundle.pem");
+    if let Err(error) = std::fs::create_dir_all(cache).and_then(|()| std::fs::write(&path, &bundle))
+    {
+        log::warn!("mobile: cannot write the certificate bundle: {error}");
+        return;
+    }
+    // SAFETY: this runs in the core's constructor before the core starts a thread of its own,
+    // and nothing on the Java side reads the process environment.
+    unsafe { std::env::set_var("SSL_CERT_FILE", &path) };
 }
 
 /// Locks a mutex, taking it over from a thread that panicked while holding it.

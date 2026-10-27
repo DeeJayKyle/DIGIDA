@@ -200,6 +200,14 @@ private fun HomeScreen(
             IconPill(Icons.Rounded.Settings, stringResource(R.string.settings), onSettings, size = 40.dp)
         }
         ServiceChips(library, Modifier.padding(bottom = 12.dp))
+        // a guest has no library, so its page is search, with nothing to go back to
+        if (shelf.guest) {
+            val status by library.status.collectAsStateWithLifecycle()
+            SearchScreen(library, onBack = null) { songs, index ->
+                SongRow(songs[index], playing = status.song?.id == songs[index].id) { library.play(songs, index) }
+            }
+            return@Column
+        }
         Segmented(
             listOf(stringResource(R.string.albums), stringResource(R.string.songs), stringResource(R.string.playlists)),
             tab,
