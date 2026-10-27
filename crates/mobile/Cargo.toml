@@ -10,15 +10,6 @@ license.workspace = true
 name = "digida_mobile"
 crate-type = ["lib", "cdylib"]
 
-[features]
-# The `uniffi-bindgen` binary that writes the Kotlin bindings, off in the library build.
-bindgen = ["uniffi/cli"]
-
-[[bin]]
-name = "uniffi-bindgen"
-path = "src/bindgen.rs"
-required-features = ["bindgen"]
-
 [dependencies]
 anyhow.workspace = true
 log.workspace = true

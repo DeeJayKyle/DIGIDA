@@ -28,7 +28,7 @@ static MIGRATION: Once = Once::new();
 /// Sonora's cache root, `$XDG_CACHE_HOME/sonora`, falling back to the temp dir. It holds only
 /// what Sonora can fetch again, since cleaners and the system are free to empty it.
 pub(crate) fn root() -> PathBuf {
-    dirs::cache_dir()
+    storage::folders::cache_dir()
         .unwrap_or_else(std::env::temp_dir)
         .join("digida")
 }
@@ -45,7 +45,8 @@ pub(crate) fn dir(slug: &str) -> PathBuf {
 /// crash leaves either the old sign-in or the new one and never half of either. It fails when
 /// the system names no data folder, rather than leaving credentials in the shared temp dir.
 pub(crate) fn write(path: &Path, contents: &[u8]) -> Result<()> {
-    let private = dirs::data_local_dir().context("cannot find a private folder for credentials")?;
+    let private =
+        storage::folders::data_dir().context("cannot find a private folder for credentials")?;
     if !path.starts_with(&private) {
         anyhow::bail!(
             "cannot store credentials outside {}: {}",
@@ -105,7 +106,7 @@ pub(crate) fn remove(path: &Path) {
 /// The folder that holds every provider's accounts folder. It falls back to the temp dir like
 /// the cache root, and [`write`] refuses to store anything under that fallback.
 fn accounts() -> PathBuf {
-    dirs::data_local_dir()
+    storage::folders::data_dir()
         .unwrap_or_else(std::env::temp_dir)
         .join("digida")
         .join("accounts")

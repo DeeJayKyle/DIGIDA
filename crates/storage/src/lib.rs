@@ -1,4 +1,5 @@
 mod cache;
+pub mod folders;
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -86,7 +87,7 @@ pub struct Database {
 
 impl Database {
     pub fn standard() -> Self {
-        let data = dirs::data_local_dir()
+        let data = folders::data_dir()
             .unwrap_or_else(std::env::temp_dir)
             .join("digida");
         Self {

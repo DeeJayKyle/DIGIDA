@@ -1,0 +1,10 @@
+[package]
+name = "uniffi-bindgen"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Writes the Kotlin bindings of the mobile core from its built library. It stands apart from
+# the core so running it never builds the music engine for the machine doing the build.
+[dependencies]
+uniffi = { workspace = true, features = ["cli"] }

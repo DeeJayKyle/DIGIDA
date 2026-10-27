@@ -23,6 +23,6 @@ trap 'rm -f "$config"' EXIT
 
 cd "$root"
 cargo ndk --platform "$api" -t arm64-v8a -t x86_64 -o "$app/jniLibs" build --locked --config "$config" --profile "$profile" -p mobile
-cargo run --locked -p mobile --features bindgen --bin uniffi-bindgen -- generate \
+cargo run --locked -p uniffi-bindgen -- generate \
   --library "target/aarch64-linux-android/$profile/libdigida_mobile.so" \
   --language kotlin --out-dir "$app/java" --no-format

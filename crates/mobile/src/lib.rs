@@ -132,6 +132,9 @@ impl Digida {
         let cache = PathBuf::from(cache_dir);
         std::fs::create_dir_all(&data).map_err(anyhow::Error::from)?;
         std::fs::create_dir_all(&cache).map_err(anyhow::Error::from)?;
+        // the music engine keeps sign-ins and downloads under these, since Android names no
+        // platform folders of its own
+        storage::folders::set(data.clone(), cache.clone());
         let provider = LocalProvider::new(
             cache.join("local"),
             Database::at(data.join("state.sqlite")),
