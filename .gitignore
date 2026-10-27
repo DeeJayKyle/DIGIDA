@@ -1,6 +1,8 @@
 /target
 /result
-/.claude
+/.claude/*
+!/.claude/settings.json
+!/.claude/hooks/
 /.direnv
 /vendor
 __pycache__/
