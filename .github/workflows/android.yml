@@ -14,9 +14,10 @@ on:
         required: true
         type: string
 
+# The core is left unstripped: its Kotlin bindings are read from its symbols, and Gradle strips
+# the libraries itself as it packs the APK.
 env:
   CARGO_TERM_COLOR: always
-  CARGO_PROFILE_RELEASE_STRIP: symbols
   DIGIDA_VERSION: ${{ inputs.version || '' }}
 
 jobs:
