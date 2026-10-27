@@ -307,6 +307,14 @@ fun SignInPrompts(library: Library) {
         }
     }
 
+    val cookies = asking?.takeIf { it.prompt is Prompt.Cookies }
+    val login = remember(cookies?.service) { cookies?.let { library.webLogin(it.service) } }
+    if (cookies != null && login != null) {
+        val name = library.services.value.firstOrNull { it.slug == cookies.service }?.name ?: cookies.service
+        WebLoginScreen(name, login, onCookies = library::answer, onCancel = library::cancelSignIn)
+        return
+    }
+
     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.BottomCenter) {
         val prompt = asking?.prompt
         AnimatedVisibility(

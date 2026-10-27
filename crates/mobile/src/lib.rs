@@ -113,6 +113,19 @@ pub struct Service {
     pub account: Option<String>,
 }
 
+/// How to catch a provider's sign-in cookies in a web view: open `url`, and once the cookies
+/// for `domain` carry one of the `proof` names the user is through, and those cookies, as a
+/// `Cookie` header, are the answer to [`Prompt::Cookies`]. `agent` replaces the web view's own
+/// user agent where the provider wants one.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct WebLogin {
+    pub url: String,
+    pub landing: String,
+    pub domain: String,
+    pub proof: Vec<String>,
+    pub agent: Option<String>,
+}
+
 /// An account a sign-in asks the listener to pick.
 #[derive(Clone, Debug, uniffi::Record)]
 pub struct Account {
@@ -361,6 +374,18 @@ impl Digida {
         *lock(&self.answers) = None;
         self.keep(&slug, signed?);
         Ok(())
+    }
+
+    /// How `slug` signs in through a web view, for a provider that takes cookies.
+    pub fn web_login(&self, slug: String) -> Option<WebLogin> {
+        let web = self.provider(&slug).ok()?.web_sign_in()?;
+        Some(WebLogin {
+            url: web.url.to_owned(),
+            landing: web.landing.to_owned(),
+            domain: web.domain.to_owned(),
+            proof: web.proof.iter().map(|name| (*name).to_owned()).collect(),
+            agent: web.agent.map(str::to_owned),
+        })
     }
 
     /// Answers the prompt a running sign-in raised: the cookies it asked for, or the id of

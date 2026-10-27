@@ -25,6 +25,7 @@ import uniffi.digida_mobile.Release
 import uniffi.digida_mobile.Service
 import uniffi.digida_mobile.Song
 import uniffi.digida_mobile.Status
+import uniffi.digida_mobile.WebLogin
 
 /** The process: one Rust core, the library it shows and the playback status it reports. */
 class DigidaApp : Application() {
@@ -185,6 +186,9 @@ class Library(private val context: Context, private val preferences: Preferences
         _services.value = core.services()
         if (_active.value == slug) show(LOCAL)
     }
+
+    /** How `slug` signs in through a web view, for a provider that takes cookies. */
+    fun webLogin(slug: String): WebLogin? = core.webLogin(slug)
 
     fun dismissProblem() {
         _problem.value = null
