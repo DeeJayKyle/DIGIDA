@@ -189,15 +189,21 @@ fn authorize(client_id: &str, redirect_uri: &str, prompt: PromptSink) -> Result<
 }
 
 /// Carries one oauth2 request over reqwest. oauth2 only knows the reqwest it was built against,
-/// so the workspace one is handed in as a plain function instead.
+/// so the workspace one is handed in as a plain function instead. It goes through the async
+/// client on the runtime the login's blocking task belongs to, the client every other request
+/// uses, rather than the blocking one, whose own threads Android's certificate checks do not
+/// reach.
 fn exchange(request: oauth2::HttpRequest) -> Result<oauth2::HttpResponse, reqwest::Error> {
-    let sent = reqwest::blocking::Client::new().execute(request.try_into()?)?;
-    let status = sent.status();
-    let headers = sent.headers().clone();
-    let mut response = http::Response::new(sent.bytes()?.to_vec());
-    *response.status_mut() = status;
-    *response.headers_mut() = headers;
-    Ok(response)
+    let request: reqwest::Request = request.try_into()?;
+    tokio::runtime::Handle::current().block_on(async {
+        let sent = reqwest::Client::new().execute(request).await?;
+        let status = sent.status();
+        let headers = sent.headers().clone();
+        let mut response = http::Response::new(sent.bytes().await?.to_vec());
+        *response.status_mut() = status;
+        *response.headers_mut() = headers;
+        Ok(response)
+    })
 }
 
 async fn premium(session: &Session) -> Result<()> {

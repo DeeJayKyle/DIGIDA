@@ -463,25 +463,34 @@ impl Digida {
                 }
             })
             .inspect_err(|error| log::warn!("mobile: cannot list albums: {error:#}"))?;
+        log::info!("mobile: {} albums in the library", albums.len());
         Ok(albums.into_iter().map(release).collect())
     }
 
     /// The tracks of the shown library: everything a catalog holds, or what was saved.
     pub fn songs(&self) -> Result<Vec<Song>, MobileError> {
         let (api, shape, slug) = self.library()?;
-        let tracks = self.runtime.block_on(async {
-            match shape.is_catalog() {
-                true => api.all_tracks().await,
-                false => api.saved_tracks().await,
-            }
-        })?;
+        let tracks = self
+            .runtime
+            .block_on(async {
+                match shape.is_catalog() {
+                    true => api.all_tracks().await,
+                    false => api.saved_tracks().await,
+                }
+            })
+            .inspect_err(|error| log::warn!("mobile: cannot list songs: {error:#}"))?;
+        log::info!("mobile: {} songs in the library", tracks.len());
         Ok(songs(tracks, &slug))
     }
 
     /// The playlists of the shown library.
     pub fn playlists(&self) -> Result<Vec<Playlist>, MobileError> {
         let (api, _, _) = self.library()?;
-        let playlists = self.runtime.block_on(api.playlists())?;
+        let playlists = self
+            .runtime
+            .block_on(api.playlists())
+            .inspect_err(|error| log::warn!("mobile: cannot list playlists: {error:#}"))?;
+        log::info!("mobile: {} playlists in the library", playlists.len());
         Ok(playlists.into_iter().map(list).collect())
     }
 

@@ -62,4 +62,5 @@
     <string name="show_log">Show log</string>
     <string name="refresh_log">Refresh</string>
     <string name="copy_log">Copy log</string>
+    <string name="empty_service">Nothing saved to this library yet. Search to find music, or save some in the service\'s own app.</string>
 </resources>

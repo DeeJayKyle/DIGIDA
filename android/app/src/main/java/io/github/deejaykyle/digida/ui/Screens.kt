@@ -221,7 +221,10 @@ private fun HomeScreen(
                 null,
             )
             shelf.albums.isEmpty() && shelf.songs.isEmpty() && shelf.playlists.isEmpty() ->
-                Message(stringResource(R.string.empty_title), shelf.error ?: stringResource(R.string.empty_detail))
+                Message(
+                    stringResource(R.string.empty_title),
+                    shelf.error ?: stringResource(if (active == Library.LOCAL) R.string.empty_detail else R.string.empty_service),
+                )
             tab == 0 -> AlbumGrid(shelf.albums, onAlbum)
             tab == 2 -> PlaylistGrid(shelf.playlists, onPlaylist)
             else -> SongList(shelf.songs, library, header = {
