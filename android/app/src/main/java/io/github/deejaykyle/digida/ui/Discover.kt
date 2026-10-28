@@ -36,12 +36,14 @@ import androidx.compose.material.icons.automirrored.rounded.PlaylistAdd
 import androidx.compose.material.icons.automirrored.rounded.QueueMusic
 import androidx.compose.material.icons.rounded.Album
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.DownloadForOffline
 import androidx.compose.material.icons.rounded.Favorite
 import androidx.compose.material.icons.rounded.Home
 import androidx.compose.material.icons.rounded.LibraryMusic
 import androidx.compose.material.icons.rounded.Person
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Radio
+import androidx.compose.material.icons.rounded.SaveAlt
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.Shuffle
@@ -476,6 +478,16 @@ fun SongMenu(song: Song?, library: Library, navigator: Navigator, onClose: () ->
                 }
                 if (shown.provider != Library.LOCAL) {
                     MenuItem(Icons.Rounded.Favorite, stringResource(R.string.like)) { library.setLiked(shown, true); onClose() }
+                }
+                if (shown.provider != Library.LOCAL) {
+                    MenuItem(Icons.Rounded.DownloadForOffline, stringResource(R.string.download_offline)) {
+                        library.download(listOf(shown)); onClose()
+                    }
+                }
+                if (library.savesFiles(shown)) {
+                    MenuItem(Icons.Rounded.SaveAlt, stringResource(R.string.save_file)) {
+                        library.saveFiles(listOf(shown)); onClose()
+                    }
                 }
             }
         }

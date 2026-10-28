@@ -45,6 +45,7 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
         val app = application as DigidaApp
+        app.library.offerLink(sharedLink(intent))
 
         setContent {
             val finish by app.preferences.finish.collectAsStateWithLifecycle()
@@ -61,8 +62,22 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onNewIntent(intent: android.content.Intent) {
+        super.onNewIntent(intent)
+        (application as DigidaApp).library.offerLink(sharedLink(intent))
+    }
+
     private fun hasMusicAccess() =
         ContextCompat.checkSelfPermission(this, musicPermission()) == PackageManager.PERMISSION_GRANTED
+}
+
+/** The link an intent hands the app: one it was asked to open, or the first in shared text. */
+private fun sharedLink(intent: android.content.Intent?): String? = when (intent?.action) {
+    android.content.Intent.ACTION_VIEW -> intent.dataString
+    android.content.Intent.ACTION_SEND ->
+        intent.getStringExtra(android.content.Intent.EXTRA_TEXT)
+            ?.let { Regex("https?://\\S+").find(it)?.value }
+    else -> null
 }
 
 /** The permission that reads audio files: its own since Android 13, all storage before. */
@@ -81,6 +96,8 @@ private fun AccessScreen(onAnswer: (Boolean) -> Unit) {
             add(Manifest.permission.READ_MEDIA_IMAGES)
             add(Manifest.permission.POST_NOTIFICATIONS)
         }
+        // saved files land in Music, which Android 10 and older only let an app write to with this
+        if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.Q) add(Manifest.permission.WRITE_EXTERNAL_STORAGE)
     }
     val ask = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { answers ->
         onAnswer(answers[musicPermission()] == true)

@@ -4,6 +4,10 @@
 //! app makes them off its main thread; what playback and sign-in do arrives at the
 //! [`Listener`].
 
+mod downloads;
+mod links;
+mod scrobbling;
+
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -27,6 +31,14 @@ const POSITION_INTERVAL: Duration = Duration::from_millis(250);
 const RESTART: Duration = Duration::from_secs(3);
 /// The slug of the provider that plays files on the phone.
 const LOCAL: &str = "local";
+const SPOTIFY: &str = "spotify";
+/// How much the cache of played songs may hold, in bytes. Downloads do not count against it.
+const CACHE_LIMIT: u64 = 2 << 30;
+/// The name a scrobbling service's approval page is asked for under.
+const SCROBBLING: &str = "scrobbling";
+const YOUTUBE: &str = "youtube";
+/// How far apart two recordings' lengths may be and still be the same song, in milliseconds.
+const MATCH_LENGTH: u64 = 15_000;
 /// How many bands the graphic equalizer has.
 const BANDS: usize = 10;
 /// Where AutoEq's results are read from.
@@ -61,7 +73,7 @@ impl From<anyhow::Error> for MobileError {
 
 /// One track as the app lists it, with the provider that plays it. `cover` is a file path or
 /// a URL.
-#[derive(Clone, Debug, uniffi::Record)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, uniffi::Record)]
 pub struct Song {
     pub id: String,
     pub provider: String,
@@ -313,6 +325,15 @@ struct Shared {
     autoplay: std::sync::atomic::AtomicBool,
     /// Whether playback stops when the song playing ends, for the sleep timer's end of song.
     stop_at_end: std::sync::atomic::AtomicBool,
+    /// Spotify, asked whether its account has Premium. Without it, Spotify's songs play from
+    /// their match on YouTube Music.
+    spotify: Arc<music::spotify::SpotifyProvider>,
+    /// The core's runtime, for the match a stand-in song waits on.
+    handle: tokio::runtime::Handle,
+    /// The linked scrobbling accounts and the listen playing now.
+    scrobbles: Mutex<scrobbling::Scrobbles>,
+    /// What is downloaded, and what waits to be.
+    downloads: Mutex<downloads::Downloads>,
 }
 
 /// A station of songs like a seed: its provider, the seed, and where its next stretch begins,
@@ -322,6 +343,21 @@ struct Station {
     provider: String,
     seed: String,
     from: Option<String>,
+}
+
+/// One search result weighed as a match: whether it is about as long, how much of the title and
+/// of the artist it holds, from none at zero to all at one, and its id.
+struct Candidate {
+    close: bool,
+    named: f64,
+    by: f64,
+    id: String,
+}
+
+impl Candidate {
+    fn score(&self) -> f64 {
+        self.named + self.by
+    }
 }
 
 /// The core. One per app process.
@@ -355,6 +391,11 @@ impl Digida {
         normalise: bool,
     ) -> Result<Arc<Self>, MobileError> {
         logging();
+        // Two rustls backends are compiled in, as on the desktop, and rustls refuses to guess
+        // between them, so one is picked before anything opens a connection.
+        rustls::crypto::ring::default_provider()
+            .install_default()
+            .ok();
         #[cfg(target_os = "android")]
         trust(std::path::Path::new(&cache_dir));
         let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -372,6 +413,14 @@ impl Digida {
 
         // Providers read their settings from the environment as on the desktop, so they are
         // built on the runtime that some of them start tasks on.
+        // played songs are cached and downloads kept in the encrypted vault, as on the desktop;
+        // players that keep their own files, like librespot, are told before they sign in
+        music::vault::Vault::set_keeping(true, CACHE_LIMIT);
+        let vault = Arc::new(music::vault::Vault::standard(CACHE_LIMIT));
+        unlock(&vault, &data);
+
+        // an account without Premium is kept for its library, and its songs play from YouTube
+        let spotify = Arc::new(music::spotify::SpotifyProvider::from_env().keeping_free());
         let providers: Vec<Arc<dyn MusicProvider>> = runtime.block_on(async {
             vec![
                 Arc::new(LocalProvider::new(
@@ -379,7 +428,7 @@ impl Digida {
                     Database::at(data.join("state.sqlite")),
                     Cache::at(cache.join("cache.sqlite")),
                 )) as Arc<dyn MusicProvider>,
-                Arc::new(music::spotify::SpotifyProvider::from_env()),
+                spotify.clone() as Arc<dyn MusicProvider>,
                 Arc::new(music::youtube::YouTubeProvider::new()),
                 Arc::new(music::apple::AppleProvider::new()),
                 Arc::new(music::deezer::DeezerProvider::new()),
@@ -416,10 +465,11 @@ impl Digida {
             quality: Quality::default(),
             meter: Meter::default(),
             analyzer: Analyzer::default(),
-            vault: None,
+            vault: Some(vault),
         };
 
-        Ok(Arc::new(Self {
+        let handle = runtime.handle().clone();
+        let core = Arc::new(Self {
             runtime,
             shared: Arc::new(Shared {
                 slots: Mutex::new(slots),
@@ -430,6 +480,10 @@ impl Digida {
                 station: Mutex::new(None),
                 autoplay: std::sync::atomic::AtomicBool::new(true),
                 stop_at_end: std::sync::atomic::AtomicBool::new(false),
+                spotify,
+                handle,
+                scrobbles: Mutex::new(scrobbling::Scrobbles::load(data.join("scrobbling.json"))),
+                downloads: Mutex::new(downloads::Downloads::load(data.join("downloads.json"))),
             }),
             active: Mutex::new(LOCAL.to_owned()),
             answers: Mutex::new(None),
@@ -438,7 +492,23 @@ impl Digida {
             headphones: Mutex::new(None),
             cache,
             config,
-        }))
+        });
+        // a scrobbling service's approval page opens in the app's browser tab, as a sign-in's does
+        let shared = Arc::downgrade(&core.shared);
+        music::scrobble::set_opener(move |url| {
+            let listener = shared
+                .upgrade()
+                .and_then(|shared| lock(&shared.listener).clone());
+            if let Some(listener) = listener {
+                listener.prompt(
+                    SCROBBLING.to_owned(),
+                    Prompt::Url {
+                        url: url.to_owned(),
+                    },
+                );
+            }
+        });
+        Ok(core)
     }
 
     /// Hands the core the one listener it tells about playback and sign-in, replacing any
@@ -741,12 +811,17 @@ impl Digida {
             hits
         });
         let synced = |hit: &music::LyricsHit| matches!(hit.lyrics, music::Lyrics::Synced { .. });
+        // among synced lyrics, ones timed word by word come first, since they can sweep
+        let timed = |hit: &music::LyricsHit| match &hit.lyrics {
+            music::Lyrics::Synced { lines } => lines.iter().any(|line| line.words.is_some()),
+            music::Lyrics::Plain { .. } => false,
+        };
         let best = hits
             .iter()
             .filter(|hit| synced(hit))
-            .max_by_key(|hit| hit.trust)
+            .max_by_key(|hit| (timed(hit), hit.trust))
             .or_else(|| hits.iter().max_by_key(|hit| hit.trust))?;
-        let lines = match &best.lyrics {
+        let lines: Vec<Line> = match &best.lyrics {
             music::Lyrics::Synced { lines } => lines
                 .iter()
                 .map(|line| Line {
@@ -788,6 +863,13 @@ impl Digida {
                     .collect()
             }
         };
+        log::info!(
+            "mobile: lyrics from {}, {} of {} lines timed by word, {} romanised",
+            best.source,
+            lines.iter().filter(|line| !line.words.is_empty()).count(),
+            lines.len(),
+            lines.iter().filter(|line| line.romanized.is_some()).count(),
+        );
         Some(Words {
             synced: synced(best),
             lines,
@@ -1191,6 +1273,36 @@ impl Digida {
         if let Some(events) = started {
             listen(&self.runtime, self.shared.clone(), slug.to_owned(), events);
         }
+        if slug == SPOTIFY && self.shared.spotify.free() {
+            self.stand_in_ready();
+        }
+    }
+
+    /// Signs YouTube Music in as a guest when nothing else has, so a Spotify account without
+    /// Premium has somewhere to play its songs from.
+    fn stand_in_ready(&self) {
+        let provider = {
+            let slots = lock(&self.shared.slots);
+            let Some(slot) = slots.get(YOUTUBE) else {
+                return;
+            };
+            if slot.session.is_some() {
+                return;
+            }
+            slot.provider.clone()
+        };
+        let (_answers, input) = tokio::sync::mpsc::unbounded_channel();
+        let prompt: music::PromptSink = Arc::new(|_| {});
+        match self
+            .runtime
+            .block_on(provider.sign_in(SignIn::Anonymous, prompt, input))
+        {
+            Ok(session) => {
+                log::info!("mobile: youtube is signed in as a guest to play spotify's songs");
+                self.keep(YOUTUBE, session);
+            }
+            Err(error) => log::warn!("mobile: cannot sign youtube in as a guest: {error:#}"),
+        }
     }
 }
 
@@ -1223,9 +1335,11 @@ fn listen(
             }
             let changed = fold(&mut lock(&shared.status), &event);
             if changed {
+                scrobbling::heard(&shared, lock(&shared.status).position_ms);
                 tell(&shared);
             }
             if ended {
+                scrobbling::finish(&shared);
                 // the sleep timer's end of song pauses here, ready to carry on from the next one
                 if shared
                     .stop_at_end
@@ -1332,7 +1446,7 @@ fn current_player(shared: &Shared) -> Option<Arc<dyn Player>> {
 
 /// Loads the queue's current song into its provider's engine, pausing another provider's
 /// engine that was playing, and puts the song in the status.
-fn load_current(shared: &Shared) {
+fn load_current(shared: &Arc<Shared>) {
     let (song, index, length) = {
         let queue = lock(&shared.queue);
         (
@@ -1344,8 +1458,17 @@ fn load_current(shared: &Shared) {
     let Some(song) = song else {
         return;
     };
-    let before = lock(&shared.playing).replace(song.provider.clone());
-    if let Some(before) = before.filter(|before| *before != song.provider)
+    // a downloaded song plays from where it was kept, under the id it was kept by
+    let offline = lock(&shared.downloads).offline(&song);
+    // a Spotify song without Premium plays its match from YouTube's engine
+    let stand_in = offline.is_none() && song.provider == SPOTIFY && shared.spotify.free();
+    let engine = match (&offline, stand_in) {
+        (Some((engine, _)), _) => engine.clone(),
+        (None, true) => YOUTUBE.to_owned(),
+        (None, false) => song.provider.clone(),
+    };
+    let before = lock(&shared.playing).replace(engine.clone());
+    if let Some(before) = before.filter(|before| *before != engine)
         && let Some(player) = lock(&shared.slots)
             .get(&before)
             .and_then(|slot| slot.player.clone())
@@ -1362,14 +1485,49 @@ fn load_current(shared: &Shared) {
         status.song = Some(song.clone());
     }
     tell(shared);
+    scrobbling::started(shared, &song);
 
     let player = lock(&shared.slots)
-        .get(&song.provider)
+        .get(&engine)
         .and_then(|slot| slot.player.clone());
     match player {
+        Some(player) if stand_in => {
+            let shared = shared.clone();
+            shared.handle.clone().spawn(async move {
+                let found = matched(&shared, &song).await;
+                // the queue may have moved on while the match was looked for
+                let current = lock(&shared.status).song.as_ref().map(|it| it.id.clone());
+                if current.as_deref() != Some(song.id.as_str()) {
+                    return;
+                }
+                match found {
+                    Some(id) => {
+                        log::info!("mobile: playing spotify's {} as youtube's {id}", song.id);
+                        if let Err(error) = player.load(&id, Duration::ZERO, false) {
+                            log::warn!("mobile: cannot load {id}: {error:#}");
+                        }
+                    }
+                    None => {
+                        log::warn!(
+                            "mobile: youtube has no match for {} by {}",
+                            song.title,
+                            song.artist
+                        );
+                        match advance(&shared) {
+                            true => load_current(&shared),
+                            false => {
+                                lock(&shared.status).state = PlayState::Idle;
+                                tell(&shared);
+                            }
+                        }
+                    }
+                }
+            });
+        }
         Some(player) => {
-            log::info!("mobile: loading {} from {}", song.id, song.provider);
-            if let Err(error) = player.load(&song.id, Duration::ZERO, false) {
+            let id = offline.map_or_else(|| song.id.clone(), |(_, id)| id);
+            log::info!("mobile: loading {id} from {engine}");
+            if let Err(error) = player.load(&id, Duration::ZERO, false) {
                 log::warn!("mobile: cannot load {}: {error:#}", song.id);
             }
         }
@@ -1644,6 +1802,115 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 }
 
 /// How many of the latest log lines the diagnostics keep.
+/// The YouTube Music song that is `song`, looked for by its title and first artist. Labels
+/// Spotify adds in brackets or after a dash, like "(Live)" or "- Remastered", are left out of the
+/// search, since an upload rarely carries them. A result about as long whose title and artist
+/// agree most wins; failing one, a result whose title holds the whole of the song's title and
+/// names its artist, however long it runs, since a live or cover take seldom keeps the length.
+async fn matched(shared: &Shared, song: &Song) -> Option<String> {
+    let api = api_of(shared, YOUTUBE)?;
+    let core = core_title(&song.title);
+    let lead = song
+        .artist
+        .split([',', '&'])
+        .next()
+        .unwrap_or(&song.artist)
+        .trim();
+    let query = format!("{core} {lead}");
+    let tracks = api
+        .search(&query)
+        .await
+        .inspect_err(|error| log::warn!("mobile: youtube cannot search for a match: {error:#}"))
+        .ok()?;
+    let title = words(&core);
+    let artist = words(lead);
+    let scored: Vec<Candidate> = songs(tracks, YOUTUBE)
+        .into_iter()
+        .map(|candidate| Candidate {
+            close: song.duration_ms == 0
+                || candidate.duration_ms == 0
+                || candidate.duration_ms.abs_diff(song.duration_ms) <= MATCH_LENGTH,
+            named: overlap(&title, &words(&candidate.title)),
+            by: overlap(
+                &artist,
+                &words(&format!("{} {}", candidate.artist, candidate.title)),
+            ),
+            id: candidate.id,
+        })
+        .collect();
+    let best = |keep: fn(&Candidate) -> bool| {
+        scored
+            .iter()
+            .filter(|candidate| keep(candidate))
+            .max_by(|a, b| a.score().total_cmp(&b.score()))
+            .map(|candidate| candidate.id.clone())
+    };
+    best(|candidate| candidate.close && candidate.named > 0.5)
+        .or_else(|| best(|candidate| candidate.named >= 1. && candidate.by > 0.))
+}
+
+/// A title without the labels a service adds to it: whatever is in brackets, and whatever follows
+/// a spaced dash. A title that is nothing but labels stays as it was.
+fn core_title(title: &str) -> String {
+    let mut core = String::new();
+    let mut depth = 0usize;
+    for c in title.chars() {
+        match c {
+            '(' | '[' => depth += 1,
+            ')' | ']' => depth = depth.saturating_sub(1),
+            c if depth == 0 => core.push(c),
+            _ => {}
+        }
+    }
+    let core = core.split(" - ").next().unwrap_or(&core).trim().to_owned();
+    match core.is_empty() {
+        true => title.to_owned(),
+        false => core,
+    }
+}
+
+/// The lowercase words of `text`, with punctuation dropped.
+fn words(text: &str) -> Vec<String> {
+    text.split(|c: char| !c.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .map(str::to_lowercase)
+        .collect()
+}
+
+/// How many of `wanted`'s words `found` holds, from none at zero to all at one.
+fn overlap(wanted: &[String], found: &[String]) -> f64 {
+    if wanted.is_empty() {
+        return 0.;
+    }
+    let held = wanted.iter().filter(|word| found.contains(word)).count();
+    held as f64 / wanted.len() as f64
+}
+
+/// Unlocks `vault` with the key kept in `data`, making one on the first run. A key gone missing
+/// while downloads are sealed under it leaves the vault locked rather than replacing it, so the
+/// downloads come back if the key does.
+fn unlock(vault: &music::vault::Vault, data: &std::path::Path) {
+    let path = data.join("vault.key");
+    let master = match std::fs::read(&path) {
+        Ok(master) if master.len() == music::vault::MASTER => Ok(master),
+        Ok(_) => Err(anyhow::anyhow!("the vault key has the wrong length")),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && !vault.holds_downloads() => {
+            music::vault::Vault::new_master().and_then(|master| {
+                std::fs::write(&path, master)?;
+                Ok(master.to_vec())
+            })
+        }
+        Err(error) => Err(anyhow::Error::from(error).context("cannot read the vault key")),
+    };
+    match master {
+        Ok(master) => vault.unlock(&master),
+        Err(error) => {
+            log::warn!("mobile: the vault stays locked, so nothing plays from disk: {error:#}");
+            vault.stay_locked();
+        }
+    }
+}
+
 /// A duration in whole milliseconds.
 fn millis(at: Duration) -> u64 {
     at.as_millis() as u64
@@ -1729,6 +1996,12 @@ fn logging() {
     if log::set_logger(Box::leak(Box::new(recorder))).is_ok() {
         log::set_max_level(log::LevelFilter::Info);
     }
+}
+
+/// The changelog the app was built with, in Keep a Changelog's Markdown.
+#[uniffi::export]
+pub fn changelog() -> String {
+    include_str!("../../../CHANGELOG.md").to_owned()
 }
 
 /// The latest lines of the core's log, oldest first, for the diagnostics screen.

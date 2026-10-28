@@ -84,7 +84,7 @@ impl Service for AudioScrobbler {
         let listener = TcpListener::bind(("127.0.0.1", PORT))
             .await
             .context("cannot listen for the scrobbling callback")?;
-        open::that_in_background(authorize_url(self.authorize, &key));
+        super::open_page(&authorize_url(self.authorize, &key));
 
         let token = token(listener).await?;
         let form = vec![

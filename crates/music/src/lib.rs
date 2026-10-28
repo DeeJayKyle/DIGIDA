@@ -173,6 +173,12 @@ pub trait MusicApi: Send + Sync {
         anyhow::bail!("this provider cannot edit tags")
     }
     async fn track(&self, track_id: &str) -> Result<Track>;
+    /// The track's file as the listener's own server stores it, with its extension, for a
+    /// provider whose catalogue is the listener's own music. A streaming service has none to give
+    /// and answers `None`, since its tracks only ever play inside the app.
+    async fn original_file(&self, _track_id: &str) -> Result<Option<(Vec<u8>, String)>> {
+        Ok(None)
+    }
 
     /// Delete a track file from disk (only for local provider)
     async fn delete_track_file(&self, _track_id: &str) -> Result<()> {
