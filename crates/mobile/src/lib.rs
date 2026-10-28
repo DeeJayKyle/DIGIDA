@@ -266,6 +266,21 @@ struct Shared {
     queue: Mutex<Queue>,
     status: Mutex<Status>,
     listener: Mutex<Option<Arc<dyn Listener>>>,
+    /// The station the queue is following, so autoplay fetches its next stretch.
+    station: Mutex<Option<Station>>,
+    /// Whether the queue carries on with a station of similar songs once it runs out.
+    autoplay: std::sync::atomic::AtomicBool,
+    /// Whether playback stops when the song playing ends, for the sleep timer's end of song.
+    stop_at_end: std::sync::atomic::AtomicBool,
+}
+
+/// A station of songs like a seed: its provider, the seed, and where its next stretch begins,
+/// `None` once the provider has no more.
+#[derive(Clone)]
+struct Station {
+    provider: String,
+    seed: String,
+    from: Option<String>,
 }
 
 /// The core. One per app process.
@@ -277,6 +292,8 @@ pub struct Digida {
     active: Mutex<String>,
     /// Where an answer to a running sign-in's prompt goes.
     answers: Mutex<Option<UnboundedSender<String>>>,
+    /// The running sleep timer, aborted when it is set again or cancelled.
+    sleep: Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// Keeps the equalizer's one writer alive, flat and off, for as long as the engines read it.
     _equalizer: EqualizerWriter,
     config: PlaybackConfig,
@@ -287,7 +304,11 @@ impl Digida {
     /// Opens the core over `data_dir`, where sign-ins and the library database live, and
     /// `cache_dir`, where covers and the scan index go. Both are the app's private folders.
     #[uniffi::constructor]
-    pub fn new(data_dir: String, cache_dir: String) -> Result<Arc<Self>, MobileError> {
+    pub fn new(
+        data_dir: String,
+        cache_dir: String,
+        normalise: bool,
+    ) -> Result<Arc<Self>, MobileError> {
         logging();
         #[cfg(target_os = "android")]
         trust(std::path::Path::new(&cache_dir));
@@ -341,7 +362,7 @@ impl Digida {
                 .map_err(|_| MobileError::Failed("cannot build a flat equalizer".to_owned()))?,
         );
         let config = PlaybackConfig {
-            normalisation: false,
+            normalisation: normalise,
             gapless: true,
             position_interval: POSITION_INTERVAL,
             gain: 1.,
@@ -361,9 +382,13 @@ impl Digida {
                 queue: Mutex::new(Queue::default()),
                 status: Mutex::new(idle()),
                 listener: Mutex::new(None),
+                station: Mutex::new(None),
+                autoplay: std::sync::atomic::AtomicBool::new(true),
+                stop_at_end: std::sync::atomic::AtomicBool::new(false),
             }),
             active: Mutex::new(LOCAL.to_owned()),
             answers: Mutex::new(None),
+            sleep: Mutex::new(None),
             _equalizer: equalizer,
             config,
         }))
@@ -697,6 +722,60 @@ impl Digida {
         })
     }
 
+    /// Plays a station of songs like `song`, the song itself first, and keeps following it as
+    /// the queue runs out.
+    pub fn start_radio(&self, song: Song) -> Result<(), MobileError> {
+        let api = api_of(&self.shared, &song.provider)
+            .ok_or_else(|| MobileError::Failed(format!("{} is not signed in", song.provider)))?;
+        let (tracks, from) = self
+            .runtime
+            .block_on(api.track_radio(&song.id, None))
+            .inspect_err(|error| log::warn!("mobile: cannot start a radio: {error:#}"))?;
+        let mut queue = vec![song.clone()];
+        queue.extend(
+            songs(tracks, &song.provider)
+                .into_iter()
+                .filter(|other| other.id != song.id),
+        );
+        *lock(&self.shared.station) = Some(Station {
+            provider: song.provider.clone(),
+            seed: song.id,
+            from,
+        });
+        self.play_queue(queue, 0);
+        Ok(())
+    }
+
+    /// Whether the queue carries on with similar songs once it runs out.
+    pub fn set_autoplay(&self, on: bool) {
+        self.shared
+            .autoplay
+            .store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Pauses after `minutes`, or once the song playing ends when `end_of_song` is set. A
+    /// minute count of zero without the end of the song cancels the timer.
+    pub fn set_sleep_timer(&self, minutes: u32, end_of_song: bool) {
+        self.shared
+            .stop_at_end
+            .store(end_of_song, std::sync::atomic::Ordering::Relaxed);
+        let mut timer = lock(&self.sleep);
+        if let Some(running) = timer.take() {
+            running.abort();
+        }
+        if minutes == 0 || end_of_song {
+            return;
+        }
+        let shared = self.shared.clone();
+        *timer = Some(self.runtime.spawn(async move {
+            tokio::time::sleep(Duration::from_secs(u64::from(minutes) * 60)).await;
+            log::info!("mobile: the sleep timer paused playback");
+            if let Some(player) = current_player(&shared) {
+                player.pause();
+            }
+        }));
+    }
+
     /// The queue as it stands, the song playing among it at the status's `index`.
     pub fn queue(&self) -> Vec<Song> {
         lock(&self.shared.queue).songs.clone()
@@ -756,14 +835,11 @@ impl Digida {
         load_current(&self.shared);
     }
 
-    /// Replaces the queue with `songs` and plays the one at `start`.
+    /// Replaces the queue with `songs` and plays the one at `start`. The queue follows no
+    /// station until autoplay seeds one.
     pub fn play(&self, songs: Vec<Song>, start: u32) {
-        {
-            let mut queue = lock(&self.shared.queue);
-            queue.index = (start as usize).min(songs.len().saturating_sub(1));
-            queue.songs = songs;
-        }
-        load_current(&self.shared);
+        *lock(&self.shared.station) = None;
+        self.play_queue(songs, start as usize);
     }
 
     /// Pauses a playing track and resumes a paused one.
@@ -815,6 +891,16 @@ impl Digida {
 }
 
 impl Digida {
+    /// Replaces the queue with `songs` and plays the one at `start`, leaving the station alone.
+    fn play_queue(&self, songs: Vec<Song>, start: usize) {
+        {
+            let mut queue = lock(&self.shared.queue);
+            queue.index = start.min(songs.len().saturating_sub(1));
+            queue.songs = songs;
+        }
+        load_current(&self.shared);
+    }
+
     /// Starts the queue's first song when a change put one into an empty queue, and otherwise
     /// tells the listener the queue's new length.
     fn after_queue_change(&self, start: bool) {
@@ -909,7 +995,24 @@ fn listen(
                 tell(&shared);
             }
             if ended {
-                match advance(&shared) {
+                // the sleep timer's end of song pauses here, ready to carry on from the next one
+                if shared
+                    .stop_at_end
+                    .swap(false, std::sync::atomic::Ordering::Relaxed)
+                {
+                    if advance(&shared) {
+                        load_current(&shared);
+                        if let Some(player) = current_player(&shared) {
+                            player.pause();
+                        }
+                    }
+                    continue;
+                }
+                let more = advance(&shared)
+                    || (shared.autoplay.load(std::sync::atomic::Ordering::Relaxed)
+                        && extend(&shared).await
+                        && advance(&shared));
+                match more {
                     true => load_current(&shared),
                     false => {
                         lock(&shared.status).state = PlayState::Idle;
@@ -920,6 +1023,62 @@ fn listen(
         }
         log::warn!("mobile: the {slug} engine stopped");
     });
+}
+
+/// Adds the next stretch of the queue's station, seeding one from the last song when the queue
+/// follows none, and answers whether any song came. Songs already queued are left out.
+async fn extend(shared: &Shared) -> bool {
+    // a station with more to come carries on, and otherwise the last song seeds a fresh one
+    let station = lock(&shared.station)
+        .clone()
+        .filter(|station| station.from.is_some())
+        .or_else(|| {
+            let queue = lock(&shared.queue);
+            queue.songs.last().map(|last| Station {
+                provider: last.provider.clone(),
+                seed: last.id.clone(),
+                from: None,
+            })
+        });
+    let Some(station) = station else {
+        return false;
+    };
+    let Some(api) = api_of(shared, &station.provider) else {
+        return false;
+    };
+    let fetched = api
+        .track_radio(&station.seed, station.from.as_deref())
+        .await
+        .inspect_err(|error| log::info!("mobile: autoplay found nothing more: {error:#}"));
+    let Ok((tracks, from)) = fetched else {
+        return false;
+    };
+    *lock(&shared.station) = Some(Station {
+        from,
+        ..station.clone()
+    });
+    let fresh = {
+        let mut queue = lock(&shared.queue);
+        let known: std::collections::HashSet<String> =
+            queue.songs.iter().map(|song| song.id.clone()).collect();
+        let fresh: Vec<Song> = songs(tracks, &station.provider)
+            .into_iter()
+            .filter(|song| !known.contains(&song.id))
+            .collect();
+        let count = fresh.len();
+        queue.songs.extend(fresh);
+        count
+    };
+    log::info!("mobile: autoplay queued {fresh} more songs");
+    fresh > 0
+}
+
+/// The library of the provider `slug`, when it is signed in.
+fn api_of(shared: &Shared, slug: &str) -> Option<Arc<dyn MusicApi>> {
+    lock(&shared.slots)
+        .get(slug)
+        .and_then(|slot| slot.session.as_ref())
+        .map(|session| session.api.clone())
 }
 
 /// Moves the queue on a song, answering whether there was one to move to.

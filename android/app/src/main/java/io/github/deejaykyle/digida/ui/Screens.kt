@@ -737,6 +737,8 @@ private fun SettingsScreen(library: Library, preferences: Preferences, onBack: (
                     onSelect = { preferences.setMode(Mode.entries[it]) },
                 )
             }
+            item { Heading(stringResource(R.string.playback), null) }
+            item { PlaybackSettings(library, preferences) }
             item { Heading(stringResource(R.string.accounts), stringResource(R.string.accounts_detail)) }
             item { Accounts(library) }
             item { Heading(stringResource(R.string.folders), stringResource(R.string.folders_detail)) }

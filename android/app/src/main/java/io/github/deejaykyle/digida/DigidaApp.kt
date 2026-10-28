@@ -77,7 +77,12 @@ class Library(private val context: Context, private val preferences: Preferences
     private val core = Digida(
         context.filesDir.resolve("core").path,
         context.cacheDir.resolve("core").path,
-    )
+        preferences.normalise.value,
+    ).also { it.setAutoplay(preferences.autoplay.value) }
+
+    /** The sleep timer as set: minutes from now, or the end of the song, or neither. */
+    private val _sleep = MutableStateFlow<Sleep>(Sleep.Off)
+    val sleep: StateFlow<Sleep> = _sleep.asStateFlow()
 
     private val _shelf = MutableStateFlow(Shelf())
     val shelf: StateFlow<Shelf> = _shelf.asStateFlow()
@@ -237,6 +242,27 @@ class Library(private val context: Context, private val preferences: Preferences
         }
     }
 
+    /** Plays a station of songs like `song`, reporting a provider that has none. */
+    fun startRadio(song: Song) {
+        scope.launch {
+            runCatching { core.startRadio(song) }.onFailure { _problem.value = it.message }
+        }
+    }
+
+    fun setAutoplay(on: Boolean) {
+        preferences.setAutoplay(on)
+        core.setAutoplay(on)
+    }
+
+    fun setSleep(sleep: Sleep) {
+        _sleep.value = sleep
+        when (sleep) {
+            Sleep.Off -> core.setSleepTimer(0u, false)
+            Sleep.EndOfSong -> core.setSleepTimer(0u, true)
+            is Sleep.Minutes -> core.setSleepTimer(sleep.minutes.toUInt(), false)
+        }
+    }
+
     fun playNext(song: Song) = core.playNext(song)
     fun addToQueue(song: Song) = core.addToQueue(song)
     fun removeFromQueue(index: Int) = core.removeFromQueue(index.toUInt())
@@ -256,6 +282,13 @@ class Library(private val context: Context, private val preferences: Preferences
     companion object {
         const val LOCAL = "local"
     }
+}
+
+/** When the sleep timer pauses playback. */
+sealed interface Sleep {
+    data object Off : Sleep
+    data object EndOfSong : Sleep
+    data class Minutes(val minutes: Int) : Sleep
 }
 
 /** The choices the app keeps between launches. */
@@ -280,6 +313,24 @@ class Preferences(context: Context) {
     fun setMode(mode: Mode) {
         _mode.value = mode
         store.edit().putString("mode", mode.id).apply()
+    }
+
+    private val _autoplay = MutableStateFlow(store.getBoolean("autoplay", true))
+    /** Whether the queue carries on with similar songs once it runs out. */
+    val autoplay: StateFlow<Boolean> = _autoplay.asStateFlow()
+
+    private val _normalise = MutableStateFlow(store.getBoolean("normalise", false))
+    /** Whether every song plays at the same loudness. The engine reads it as it starts. */
+    val normalise: StateFlow<Boolean> = _normalise.asStateFlow()
+
+    fun setAutoplay(on: Boolean) {
+        _autoplay.value = on
+        store.edit().putBoolean("autoplay", on).apply()
+    }
+
+    fun setNormalise(on: Boolean) {
+        _normalise.value = on
+        store.edit().putBoolean("normalise", on).apply()
     }
 
     fun setFolders(folders: List<String>) {

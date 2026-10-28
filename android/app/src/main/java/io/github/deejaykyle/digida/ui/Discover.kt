@@ -41,6 +41,7 @@ import androidx.compose.material.icons.rounded.Home
 import androidx.compose.material.icons.rounded.LibraryMusic
 import androidx.compose.material.icons.rounded.Person
 import androidx.compose.material.icons.rounded.PlayArrow
+import androidx.compose.material.icons.rounded.Radio
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.Shuffle
@@ -361,6 +362,59 @@ fun SwipeToQueue(song: Song, library: Library, content: @Composable () -> Unit) 
     }
 }
 
+/** Autoplay, loudness and the sleep timer, for the settings. */
+@Composable
+fun PlaybackSettings(library: Library, preferences: io.github.deejaykyle.digida.Preferences) {
+    val autoplay by preferences.autoplay.collectAsStateWithLifecycle()
+    val normalise by preferences.normalise.collectAsStateWithLifecycle()
+    val sleep by library.sleep.collectAsStateWithLifecycle()
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Toggle(stringResource(R.string.autoplay), stringResource(R.string.autoplay_detail), autoplay) { library.setAutoplay(it) }
+        Toggle(stringResource(R.string.normalise), stringResource(R.string.normalise_detail), normalise) { preferences.setNormalise(it) }
+        Label(stringResource(R.string.sleep_timer), Modifier.padding(top = 6.dp), weight = FontWeight.SemiBold)
+        val choices = listOf(
+            io.github.deejaykyle.digida.Sleep.Off to stringResource(R.string.off),
+            io.github.deejaykyle.digida.Sleep.Minutes(15) to "15 min",
+            io.github.deejaykyle.digida.Sleep.Minutes(30) to "30 min",
+            io.github.deejaykyle.digida.Sleep.Minutes(60) to "60 min",
+            io.github.deejaykyle.digida.Sleep.EndOfSong to stringResource(R.string.end_of_song),
+        )
+        LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            items(choices) { (choice, label) ->
+                SmallButton(label, accent = choice == sleep) { library.setSleep(choice) }
+            }
+        }
+    }
+}
+
+/** A setting that is on or off, with a line saying what it does. */
+@Composable
+private fun Toggle(title: String, detail: String, on: Boolean, onChange: (Boolean) -> Unit) {
+    val palette = LocalPalette.current
+    Row(
+        Modifier.fillMaxWidth().surface(palette, Depth.Low).clickable { onChange(!on) }.padding(14.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f)) {
+            Label(title, weight = FontWeight.SemiBold)
+            Label(detail, size = 13.sp, subtle = true, lines = 3)
+        }
+        Spacer(Modifier.width(12.dp))
+        val travel by animateFloatAsState(if (on) 1f else 0f, spring(dampingRatio = 0.65f), label = "toggle")
+        Box(
+            Modifier.width(48.dp).height(28.dp)
+                .surface(palette, Depth.Low, pressed = true, fill = if (on) palette.accent else palette.muted, radius = 14.dp)
+                .padding(3.dp),
+        ) {
+            Box(
+                Modifier.graphicsLayer { translationX = travel * 20.dp.toPx() }
+                    .size(22.dp)
+                    .surface(palette, Depth.Low, fill = palette.raised, radius = 11.dp)
+            )
+        }
+    }
+}
+
 /** What can be done with one song, raised from the bottom edge. */
 @Composable
 fun SongMenu(song: Song?, library: Library, navigator: Navigator, onClose: () -> Unit) {
@@ -395,6 +449,9 @@ fun SongMenu(song: Song?, library: Library, navigator: Navigator, onClose: () ->
                 Spacer(Modifier.height(8.dp))
                 MenuItem(Icons.Rounded.SkipNext, stringResource(R.string.play_next)) { library.playNext(shown); onClose() }
                 MenuItem(Icons.AutoMirrored.Rounded.PlaylistAdd, stringResource(R.string.add_to_queue)) { library.addToQueue(shown); onClose() }
+                if (shown.provider != Library.LOCAL) {
+                    MenuItem(Icons.Rounded.Radio, stringResource(R.string.start_radio)) { library.startRadio(shown); onClose() }
+                }
                 shown.albumId?.let { id ->
                     MenuItem(Icons.Rounded.Album, stringResource(R.string.go_to_album)) {
                         onClose()
