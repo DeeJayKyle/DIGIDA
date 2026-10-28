@@ -28,6 +28,7 @@ pub mod scrobble;
 mod sink;
 mod spectrum;
 pub mod spotify;
+pub mod standin;
 mod stream;
 pub mod subsonic;
 pub mod tidal;

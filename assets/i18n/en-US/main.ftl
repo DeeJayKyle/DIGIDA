@@ -133,6 +133,12 @@ menu-download-tracks = { $count ->
     [one] Download { $count } track
    *[other] Download { $count } tracks
 }
+menu-save-file = Save file to Music folder
+menu-save-files = { $count ->
+    [one] Save { $count } file to Music folder
+   *[other] Save { $count } files to Music folder
+}
+menu-save-files-all = Save all files to Music folder
 menu-remove-download = Remove download
 menu-remove-downloads = { $count ->
     [one] Remove { $count } download
@@ -867,6 +873,17 @@ equalizer-kind-high-pass = High pass
 equalizer-kind-notch = Notch
 equalizer-kind-band-pass = Band pass
 equalizer-kind-all-pass = All pass
+equalizer-headphones = Headphones
+equalizer-headphones-search = Find your headphones
+equalizer-headphones-detail = AutoEQ's measurements correct thousands of headphones toward a neutral sound
+equalizer-headphones-hint = Headphone model
+equalizer-headphones-loading = Fetching AutoEQ's list…
+equalizer-headphones-unreachable = AutoEQ cannot be reached right now
+equalizer-headphones-none = No headphones match that name
+equalizer-headphone-apply = Use
+equalizer-headphone-source = Measured by { $source }
+equalizer-headphone-applied = Correcting for { $name }
+equalizer-headphone-failed = The correction could not be fetched
 equalizer-transfer = Import and export
 equalizer-import = Import
 equalizer-export = Export
@@ -1198,6 +1215,14 @@ settings-check-updates = Check for updates
 settings-check-updates-detail = Ask GitHub once at startup whether a newer version is out. DIGIDA installs the update itself on Windows only; elsewhere it points you at what changed
 settings-log = Log file
 settings-log-detail = What DIGIDA wrote while running. Attach it to a bug report
+settings-backup = Backup
+settings-backup-detail = Save your settings to a file, or bring a saved file back. Sign-ins stay on this computer, but linked scrobbling accounts travel with the file, so keep it private
+settings-backup-save = Save…
+settings-backup-restore = Restore…
+settings-backup-saved = Settings saved
+settings-backup-restored = Settings restored
+settings-backup-failed = The settings could not be saved
+settings-backup-unreadable = That file could not be restored
 settings-log-open = Open log
 
 # tags
@@ -1277,6 +1302,21 @@ toast-undo = Undo
 toast-link-copied = Link copied
 toast-link-sign-in = Sign in to { $name } to open this link
 toast-link-unreadable = That link does not lead anywhere DIGIDA can open
+files-busy = Files are still being saved
+files-saving = Saving files to your Music folder…
+files-saved = { $count ->
+    [one] Saved { $count } file
+   *[other] Saved { $count } files
+}
+files-saved-some = { $count ->
+    [one] Saved { $count } file in part
+   *[other] Saved some of { $count } files
+}
+files-failed-count = { $count ->
+    [one] One could not be saved. The rest are in { $folder }
+   *[other] { $count } could not be saved. The rest are in { $folder }
+}
+files-failed = The files could not be saved
 toast-code-copied = Code copied
 menu-copy-link-none = This has no link to share
 menu-copy-link-local = Local artists and playlists have no link

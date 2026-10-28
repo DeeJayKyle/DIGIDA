@@ -3,6 +3,7 @@
 //! its one writer to every output.
 
 pub mod apo;
+pub mod autoeq;
 mod design;
 mod shared;
 mod stage;

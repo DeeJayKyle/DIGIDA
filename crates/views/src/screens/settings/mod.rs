@@ -147,6 +147,7 @@ enum Slot {
     Version,
     Updates,
     Log,
+    Backup,
     License,
     Source,
 }
@@ -213,6 +214,8 @@ pub struct SettingsView {
     /// Measures the cache and the downloads again every so often while the storage section's
     /// tab is on screen, since tracks are kept and evicted as they play.
     _storage: Task<()>,
+    /// The settings backup being written out or read back in.
+    backup: Option<Task<()>>,
     drm: Entity<Drm>,
     equalizer: Entity<Equalizer>,
     settings: Entity<AppSettings>,
@@ -380,6 +383,7 @@ impl SettingsView {
         Self {
             session,
             _storage: storage,
+            backup: None,
             playback,
             drm,
             equalizer,
@@ -886,6 +890,7 @@ impl SettingsView {
                 t!("settings-check-updates-detail"),
             ),
             Slot::Log => (t!("settings-log"), t!("settings-log-detail")),
+            Slot::Backup => (t!("settings-backup"), t!("settings-backup-detail")),
             Slot::License => (t!("settings-license"), t!("settings-license-detail")),
             Slot::Source => (t!("settings-source"), t!("settings-source-detail")),
         };
@@ -981,6 +986,7 @@ impl SettingsView {
             Slot::Version => self.version_row(),
             Slot::Updates => self.updates_row(cx),
             Slot::Log => self.log_row(cx),
+            Slot::Backup => self.backup_row(cx),
             Slot::License => self.license_row(cx),
             Slot::Source => self.source_row(cx),
         }

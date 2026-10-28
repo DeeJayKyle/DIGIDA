@@ -7,7 +7,9 @@ mod discord;
 mod downloads;
 mod drm;
 mod equalizer;
+mod files;
 mod genre;
+mod headphones;
 mod history;
 mod home;
 mod library;
@@ -49,7 +51,9 @@ pub use devices::{Devices, Steered, Upcoming};
 pub use downloads::{Downloads, DownloadsChanged, Progress, downloaded};
 pub use drm::{CdmState, Drm};
 pub use equalizer::{DeviceRule, Equalizer, RuleDevice, Sound};
+pub use files::SavedFiles;
 pub use genre::{GenreDetails, Genres};
+pub use headphones::Headphones;
 pub use history::{History, HistoryState};
 pub use home::Home;
 pub use library::{
@@ -188,6 +192,8 @@ pub struct Sonora {
     pub downloads: Entity<Downloads>,
     pub drm: Entity<Drm>,
     pub equalizer: Entity<Equalizer>,
+    /// Saves songs from the listener's own server as files in their music folder.
+    pub files: Entity<SavedFiles>,
     pub library: Entity<Library>,
     pub links: Entity<Links>,
     pub history: Entity<History>,
@@ -264,6 +270,7 @@ pub fn init(
     // Playback starts no engine until a provider is up, so the saved device is handed over
     // before any stream opens.
     let equalizer = cx.new(|cx| Equalizer::new(settings.clone(), cx));
+    let files = cx.new(|_| SavedFiles::new(session.clone()));
     let playback = cx.new(|cx| {
         Playback::new(
             session.clone(),
@@ -363,6 +370,7 @@ pub fn init(
         downloads,
         drm,
         equalizer,
+        files,
         library,
         links,
         history,

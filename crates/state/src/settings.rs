@@ -2279,6 +2279,21 @@ impl AppSettings {
         SettingsSave::Complete
     }
 
+    /// The settings file as it stands, for a backup. Sign-ins live in files of their own and
+    /// are not in it.
+    pub fn backup(&self) -> Result<Vec<u8>> {
+        fs::read(&self.path).with_context(|| format!("cannot read {}", self.path.display()))
+    }
+
+    /// Puts a backup in place of the settings file, once it reads as settings. The file watcher
+    /// then loads it as it would an edit made by hand.
+    pub fn restore(&self, bytes: &[u8]) -> Result<()> {
+        serde_json::from_slice::<Values>(json(bytes))
+            .context("the file is not DIGIDA's settings")?;
+        fs::write(&self.path, bytes)
+            .with_context(|| format!("cannot write {}", self.path.display()))
+    }
+
     /// Watches the config and themes folders for changes made by another program.
     pub fn watch_files(&mut self, cx: &mut Context<Self>) {
         let (Some(folder), Some(settings_name)) = (self.path.parent(), self.path.file_name())

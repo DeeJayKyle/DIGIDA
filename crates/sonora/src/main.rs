@@ -96,7 +96,11 @@ fn main() {
 
         let database = storage::Database::standard();
         let providers: Vec<Arc<dyn music::MusicProvider>> = vec![
-            Arc::new(music::spotify::SpotifyProvider::from_env()),
+            // an account without Premium plays its songs from YouTube Music, as a guest there
+            Arc::new(
+                music::spotify::SpotifyProvider::from_env()
+                    .playing_free_through(Arc::new(music::youtube::YouTubeProvider::new())),
+            ),
             Arc::new(music::apple::AppleProvider::new()),
             Arc::new(music::youtube::YouTubeProvider::new()),
             Arc::new(music::subsonic::SubsonicProvider::new()),
@@ -334,6 +338,7 @@ fn open_window(cx: &mut App) {
         downloads: _,
         drm: _,
         equalizer: _,
+        files: _,
         library,
         links: _,
         history: _,

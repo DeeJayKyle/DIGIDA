@@ -9,6 +9,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- On the desktop, a Spotify account without Premium now signs in too. Browse your Spotify
+  library, playlists and search, and each song plays from its match on YouTube Music.
+- Find your headphones in the equalizer and play AutoEQ's correction for them as a new profile.
+- Save songs, albums and playlists from your own Navidrome or Subsonic server as files in your
+  Music folder, from their right-click menu.
+- Back up your settings to a file and restore them under Settings → About.
+
+## [0.6] - 2026-10-28
+
+### Added
+
 - On Android, a Spotify account without Premium now signs in. Browse your Spotify library,
   playlists and search, and each song plays from its match on YouTube Music.
 - Android settings are now grouped into pages: Appearance, Player and audio, Accounts,
@@ -2378,7 +2389,8 @@ The first release of DIGIDA, a fork of Sonora 0.44.2.
 Initial release: a native Spotify client with playback, an interactive queue, the saved library,
 search, album, playlist, artist and song pages, context menus and adaptive theming.
 
-[unreleased]: https://github.com/DeeJayKyle/DIGIDA/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/DeeJayKyle/DIGIDA/compare/v0.6...HEAD
+[0.6]: https://github.com/DeeJayKyle/DIGIDA/releases/tag/v0.6
 [1.0.0]: https://github.com/DeeJayKyle/DIGIDA/releases/tag/v1.0.0
 [0.44.2]: https://github.com/sonorahq/sonora/compare/v0.44.1...v0.44.2
 [0.44.1]: https://github.com/sonorahq/sonora/compare/v0.44.0...v0.44.1
