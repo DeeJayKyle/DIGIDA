@@ -3,10 +3,10 @@ resolver = "3"
 members = ["crates/*"]
 # a vendored crate keeps its upstream style, so it is not checked as one of ours
 exclude = [
-  "vendor/librespot-audio",
-  "vendor/librespot-core",
-  "vendor/librespot-metadata",
-  "vendor/librespot-playback",
+  "third_party/librespot-audio",
+  "third_party/librespot-core",
+  "third_party/librespot-metadata",
+  "third_party/librespot-playback",
 ]
 
 [workspace.package]
@@ -203,11 +203,11 @@ time = { version = "0.3.55", features = ["parsing"] }
 uniffi = "0.32"
 
 [patch.crates-io]
-librespot-audio = { path = "vendor/librespot-audio" }
-librespot-core = { path = "vendor/librespot-core" }
-librespot-metadata = { path = "vendor/librespot-metadata" }
+librespot-audio = { path = "third_party/librespot-audio" }
+librespot-core = { path = "third_party/librespot-core" }
+librespot-metadata = { path = "third_party/librespot-metadata" }
 librespot-oauth = { git = "https://github.com/sonorahq/librespot", rev = "84f551d4afc7823ef12b6b02d09e34e2ddaccf99" }
-librespot-playback = { path = "vendor/librespot-playback" }
+librespot-playback = { path = "third_party/librespot-playback" }
 librespot-protocol = { git = "https://github.com/sonorahq/librespot", rev = "84f551d4afc7823ef12b6b02d09e34e2ddaccf99" }
 rodio = { git = "https://github.com/RustAudio/rodio", rev = "880aaba54b00aead53651ed1ccbdb672d1375a95" }
 
