@@ -11,9 +11,6 @@
 
 package org.rustls.platformverifier
 
-/** Whether this is the library's own test build, which DIGIDA's never is. */
-private const val TEST = false
-
 import android.annotation.SuppressLint
 import android.content.Context
 import android.net.http.X509TrustManagerExtensions
@@ -40,6 +37,9 @@ import java.util.EnumSet
 import javax.net.ssl.TrustManagerFactory
 import javax.net.ssl.X509TrustManager
 import javax.security.auth.x500.X500Principal
+
+/** Whether this is the library's own test build, which DIGIDA's never is. */
+private const val TEST = false
 
 // If this is updated, update the Rust definition too.
 // Marked private as this is not meant to be used in Android code.
