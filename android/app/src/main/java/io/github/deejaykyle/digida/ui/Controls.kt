@@ -3,7 +3,8 @@ package io.github.deejaykyle.digida.ui
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Box
@@ -22,6 +23,8 @@ import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -37,6 +40,7 @@ import kotlin.math.abs
  * A surface that can be pressed: it springs in a touch as the finger lands and sinks into the
  * page while held, wherever the finish has relief to give.
  */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun Pressable(
     onClick: () -> Unit,
@@ -46,9 +50,11 @@ fun Pressable(
     selected: Boolean = false,
     radius: Dp? = null,
     contentAlignment: Alignment = Alignment.Center,
+    onLongClick: (() -> Unit)? = null,
     content: @Composable BoxScope.() -> Unit,
 ) {
     val palette = LocalPalette.current
+    val haptics = LocalHapticFeedback.current
     val interaction = remember { MutableInteractionSource() }
     val held by interaction.collectIsPressedAsState()
     val scale by animateFloatAsState(
@@ -66,7 +72,17 @@ fun Pressable(
                 fill = fill ?: palette.surface,
                 radius = radius ?: palette.radius,
             )
-            .clickable(interaction, indication = null, onClick = onClick),
+            .combinedClickable(
+                interactionSource = interaction,
+                indication = null,
+                onLongClick = onLongClick?.let { long ->
+                    {
+                        haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                        long()
+                    }
+                },
+                onClick = onClick,
+            ),
         contentAlignment = contentAlignment,
         content = content,
     )

@@ -15,7 +15,10 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import uniffi.digida_mobile.ArtistPage
 import uniffi.digida_mobile.Digida
+import uniffi.digida_mobile.Feed
+import uniffi.digida_mobile.Words
 import uniffi.digida_mobile.Listener
 import uniffi.digida_mobile.Method
 import uniffi.digida_mobile.PlayState
@@ -221,6 +224,23 @@ class Library(private val context: Context, private val preferences: Preferences
     suspend fun playlistSongs(playlist: Playlist): List<Song> =
         withContext(Dispatchers.IO) { core.playlistSongs(playlist.id) }
     suspend fun search(query: String): List<Song> = withContext(Dispatchers.IO) { core.search(query) }
+
+    suspend fun home(): Feed = withContext(Dispatchers.IO) { core.home() }
+    suspend fun artist(id: String): ArtistPage = withContext(Dispatchers.IO) { core.artist(id) }
+    suspend fun lyrics(song: Song): Words? = withContext(Dispatchers.IO) { core.lyrics(song) }
+    suspend fun queue(): List<Song> = withContext(Dispatchers.IO) { core.queue() }
+
+    /** Hearts a song, or takes the heart away, reporting a failure along the bottom. */
+    fun setLiked(song: Song, liked: Boolean) {
+        scope.launch {
+            runCatching { core.setLiked(song, liked) }.onFailure { _problem.value = it.message }
+        }
+    }
+
+    fun playNext(song: Song) = core.playNext(song)
+    fun addToQueue(song: Song) = core.addToQueue(song)
+    fun removeFromQueue(index: Int) = core.removeFromQueue(index.toUInt())
+    fun jump(index: Int) = core.jump(index.toUInt())
 
     fun play(songs: List<Song>, start: Int) = core.play(songs, start.toUInt())
     fun toggle() = core.toggle()

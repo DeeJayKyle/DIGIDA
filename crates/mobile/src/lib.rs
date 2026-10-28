@@ -59,6 +59,8 @@ pub struct Song {
     pub artist: String,
     pub album: String,
     pub album_id: Option<String>,
+    /// The lead artist's id, for a link to their page.
+    pub artist_id: Option<String>,
     pub cover: Option<String>,
     pub duration_ms: u64,
 }
@@ -82,6 +84,69 @@ pub struct Playlist {
     pub owner: String,
     pub cover: Option<String>,
     pub track_count: u32,
+}
+
+/// What a card on a home feed opens.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum TileKind {
+    Song,
+    Album,
+    Playlist,
+    Artist,
+    Genre,
+}
+
+/// One card on a home feed: what it opens, how it is named and drawn, and the song itself when
+/// it is one.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct Tile {
+    pub kind: TileKind,
+    pub id: String,
+    pub title: String,
+    pub subtitle: String,
+    pub cover: Option<String>,
+    pub song: Option<Song>,
+}
+
+/// One row of a home feed.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct Section {
+    pub title: String,
+    pub tiles: Vec<Tile>,
+}
+
+/// A provider's home: what was played lately, a mix of songs picked for the listener, and the
+/// rows the provider recommends.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct Feed {
+    pub listen_again: Vec<Tile>,
+    pub quick_picks: Vec<Song>,
+    pub sections: Vec<Section>,
+}
+
+/// An artist's page.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct ArtistPage {
+    pub name: String,
+    pub cover: Option<String>,
+    pub biography: Option<String>,
+    pub top: Vec<Song>,
+    pub albums: Vec<Release>,
+}
+
+/// One line of lyrics and when it starts, which is zero throughout for unsynced lyrics.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct Line {
+    pub start_ms: u64,
+    pub text: String,
+}
+
+/// A song's lyrics and where they came from.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct Words {
+    pub synced: bool,
+    pub lines: Vec<Line>,
+    pub source: String,
 }
 
 /// The ways a provider can be signed in to, as the app offers them.
@@ -518,6 +583,179 @@ impl Digida {
         Ok(songs(tracks, &slug))
     }
 
+    /// The shown provider's home feed. Local files have none, and answer an empty one.
+    pub fn home(&self) -> Result<Feed, MobileError> {
+        let (api, _, slug) = self.library()?;
+        let feed = self
+            .runtime
+            .block_on(api.home())
+            .inspect_err(|error| log::warn!("mobile: {slug} has no home: {error:#}"))?;
+        Ok(Feed {
+            listen_again: feed
+                .listen_again
+                .into_iter()
+                .filter_map(|item| tile(item, &slug))
+                .collect(),
+            quick_picks: songs(feed.quick_picks.unwrap_or_default(), &slug),
+            sections: feed
+                .sections
+                .into_iter()
+                .map(|section| Section {
+                    title: section.title,
+                    tiles: section
+                        .items
+                        .into_iter()
+                        .filter_map(|item| tile(item, &slug))
+                        .collect(),
+                })
+                .filter(|section| !section.tiles.is_empty())
+                .collect(),
+        })
+    }
+
+    /// One artist's page from the shown provider.
+    pub fn artist(&self, artist_id: String) -> Result<ArtistPage, MobileError> {
+        let (api, _, slug) = self.library()?;
+        let artist = self
+            .runtime
+            .block_on(api.artist(&artist_id))
+            .inspect_err(|error| log::warn!("mobile: cannot open artist {artist_id}: {error:#}"))?;
+        Ok(ArtistPage {
+            name: artist.name,
+            cover: artist.cover_large,
+            biography: artist.biography,
+            top: songs(artist.top_tracks, &slug),
+            albums: artist.albums.into_iter().map(release).collect(),
+        })
+    }
+
+    /// Hearts a song in its provider's library, or takes the heart away.
+    pub fn set_liked(&self, song: Song, liked: bool) -> Result<(), MobileError> {
+        let api = lock(&self.shared.slots)
+            .get(&song.provider)
+            .and_then(|slot| slot.session.as_ref())
+            .map(|session| session.api.clone())
+            .ok_or_else(|| MobileError::Failed(format!("{} is not signed in", song.provider)))?;
+        self.runtime
+            .block_on(api.set_track_saved(&song.id, liked))
+            .inspect_err(|error| log::warn!("mobile: cannot like {}: {error:#}", song.id))?;
+        Ok(())
+    }
+
+    /// A song's lyrics, synced where any source has them in time, plain otherwise, or none.
+    pub fn lyrics(&self, song: Song) -> Option<Words> {
+        let query = music::LyricsQuery {
+            title: song.title.clone(),
+            artist: song.artist.clone(),
+            album: Some(song.album.clone()).filter(|album| !album.is_empty()),
+            duration: Duration::from_millis(song.duration_ms),
+            track: None,
+        };
+        let sources: Vec<Arc<dyn music::LyricsProvider>> = vec![
+            Arc::new(music::local::LocalLyrics),
+            Arc::new(music::lrclib::LrcLib::new()),
+            Arc::new(music::youtube::YouTubeLyrics::new()),
+            Arc::new(music::netease::NetEase::new()),
+            Arc::new(music::binimum::Binimum::new()),
+        ];
+        let hits: Vec<music::LyricsHit> = self.runtime.block_on(async {
+            let mut hits = Vec::new();
+            for source in sources {
+                match source.search(&query).await {
+                    Ok(found) => hits.extend(found.into_iter().filter(|hit| !hit.instrumental)),
+                    Err(error) => log::info!("mobile: {} has no lyrics: {error:#}", source.name()),
+                }
+            }
+            hits
+        });
+        let synced = |hit: &music::LyricsHit| matches!(hit.lyrics, music::Lyrics::Synced { .. });
+        let best = hits
+            .iter()
+            .filter(|hit| synced(hit))
+            .max_by_key(|hit| hit.trust)
+            .or_else(|| hits.iter().max_by_key(|hit| hit.trust))?;
+        let lines = match &best.lyrics {
+            music::Lyrics::Synced { lines } => lines
+                .iter()
+                .map(|line| Line {
+                    start_ms: line.start.as_millis() as u64,
+                    text: line.text.clone(),
+                })
+                .collect(),
+            music::Lyrics::Plain { text, .. } => text
+                .lines()
+                .map(|line| Line {
+                    start_ms: 0,
+                    text: line.to_owned(),
+                })
+                .collect(),
+        };
+        Some(Words {
+            synced: synced(best),
+            lines,
+            source: best.source.to_owned(),
+        })
+    }
+
+    /// The queue as it stands, the song playing among it at the status's `index`.
+    pub fn queue(&self) -> Vec<Song> {
+        lock(&self.shared.queue).songs.clone()
+    }
+
+    /// Puts `song` straight after the one playing, or starts it when nothing is queued.
+    pub fn play_next(&self, song: Song) {
+        let start = {
+            let mut queue = lock(&self.shared.queue);
+            let empty = queue.songs.is_empty();
+            let at = match empty {
+                true => 0,
+                false => queue.index + 1,
+            };
+            queue.songs.insert(at, song);
+            empty
+        };
+        self.after_queue_change(start);
+    }
+
+    /// Puts `song` at the end of the queue, or starts it when nothing is queued.
+    pub fn add_to_queue(&self, song: Song) {
+        let start = {
+            let mut queue = lock(&self.shared.queue);
+            let empty = queue.songs.is_empty();
+            queue.songs.push(song);
+            empty
+        };
+        self.after_queue_change(start);
+    }
+
+    /// Takes the song at `index` out of the queue. The one playing stays where it is.
+    pub fn remove_from_queue(&self, index: u32) {
+        {
+            let mut queue = lock(&self.shared.queue);
+            let index = index as usize;
+            if index >= queue.songs.len() || index == queue.index {
+                return;
+            }
+            queue.songs.remove(index);
+            if index < queue.index {
+                queue.index -= 1;
+            }
+        }
+        self.after_queue_change(false);
+    }
+
+    /// Plays the queue's song at `index`.
+    pub fn jump(&self, index: u32) {
+        {
+            let mut queue = lock(&self.shared.queue);
+            if index as usize >= queue.songs.len() {
+                return;
+            }
+            queue.index = index as usize;
+        }
+        load_current(&self.shared);
+    }
+
     /// Replaces the queue with `songs` and plays the one at `start`.
     pub fn play(&self, songs: Vec<Song>, start: u32) {
         {
@@ -577,6 +815,25 @@ impl Digida {
 }
 
 impl Digida {
+    /// Starts the queue's first song when a change put one into an empty queue, and otherwise
+    /// tells the listener the queue's new length.
+    fn after_queue_change(&self, start: bool) {
+        if start {
+            load_current(&self.shared);
+            return;
+        }
+        let (index, length) = {
+            let queue = lock(&self.shared.queue);
+            (queue.index, queue.songs.len())
+        };
+        {
+            let mut status = lock(&self.shared.status);
+            status.index = index as u32;
+            status.queue_length = length as u32;
+        }
+        tell(&self.shared);
+    }
+
     /// The provider named `slug`, or why there is none.
     fn provider(&self, slug: &str) -> Result<Arc<dyn MusicProvider>, MobileError> {
         lock(&self.shared.slots)
@@ -847,11 +1104,64 @@ fn songs(tracks: Vec<Track>, provider: &str) -> Vec<Song> {
                 artist: track.artists,
                 album: track.album,
                 album_id: track.album_id,
+                artist_id: track
+                    .artist_refs
+                    .iter()
+                    .find_map(|artist| artist.id.clone()),
                 cover: track.cover,
                 duration_ms: track.duration.as_millis() as u64,
             })
         })
         .collect()
+}
+
+/// A home feed card the app can open, as one it knows how to draw.
+fn tile(item: music::GenreItem, provider: &str) -> Option<Tile> {
+    Some(match item {
+        music::GenreItem::Track(track) => {
+            let song = songs(vec![track], provider).pop()?;
+            Tile {
+                kind: TileKind::Song,
+                id: song.id.clone(),
+                title: song.title.clone(),
+                subtitle: song.artist.clone(),
+                cover: song.cover.clone(),
+                song: Some(song),
+            }
+        }
+        music::GenreItem::Album(album) => Tile {
+            kind: TileKind::Album,
+            id: album.id,
+            title: album.name,
+            subtitle: album.artists,
+            cover: album.cover_large.or(album.cover),
+            song: None,
+        },
+        music::GenreItem::Playlist(playlist) => Tile {
+            kind: TileKind::Playlist,
+            id: playlist.id,
+            title: playlist.name,
+            subtitle: playlist.owner,
+            cover: playlist.cover,
+            song: None,
+        },
+        music::GenreItem::Artist(artist) => Tile {
+            kind: TileKind::Artist,
+            id: artist.id,
+            title: artist.name,
+            subtitle: String::new(),
+            cover: artist.cover,
+            song: None,
+        },
+        music::GenreItem::Genre(genre) => Tile {
+            kind: TileKind::Genre,
+            id: genre.id,
+            title: genre.name,
+            subtitle: String::new(),
+            cover: genre.cover,
+            song: None,
+        },
+    })
 }
 
 fn release(album: Album) -> Release {

@@ -45,6 +45,9 @@ import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.material.icons.rounded.Pause
+import androidx.compose.material.icons.automirrored.rounded.QueueMusic
+import androidx.compose.material.icons.rounded.MoreHoriz
+import androidx.compose.material.icons.rounded.Lyrics
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Search
@@ -53,6 +56,7 @@ import androidx.compose.material.icons.rounded.Shuffle
 import androidx.compose.material.icons.rounded.SkipNext
 import androidx.compose.material.icons.rounded.SkipPrevious
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
@@ -80,81 +84,135 @@ import uniffi.digida_mobile.Release
 import uniffi.digida_mobile.Song
 import uniffi.digida_mobile.Status
 
-/** Where the app is: the library, one album, or the settings. */
+/** Where the app is: a tab's own page, or a page opened from one. */
 sealed interface Route {
+    data object Feed : Route
     data object Home : Route
+    data object Search : Route
     data class Album(val release: Release) : Route
     data class Playlist(val playlist: uniffi.digida_mobile.Playlist) : Route
-    data object Search : Route
+    data class Artist(val id: String, val name: String) : Route
     data object Settings : Route
 }
 
-/** The whole app once it may read the music: the page, the screen of the moment and the player. */
+/** The page each tab opens on. */
+private fun Tab.root(): Route = when (this) {
+    Tab.Home -> Route.Feed
+    Tab.Search -> Route.Search
+    Tab.Library -> Route.Home
+}
+
+/**
+ * The whole app once it may read the music: the page, the tabs, the player, and the menus and
+ * panels raised over them.
+ */
 @Composable
 fun App(library: Library, preferences: Preferences) {
     val palette = LocalPalette.current
     val status by library.status.collectAsStateWithLifecycle()
-    val stack = remember { mutableStateListOf<Route>(Route.Home) }
+    var tab by remember { mutableStateOf(Tab.Home) }
+    val stack = remember { mutableStateListOf<Route>(Route.Feed) }
     var expanded by remember { mutableStateOf(false) }
+    var menu by remember { mutableStateOf<Song?>(null) }
+    val back = { stack.removeAt(stack.lastIndex) }
+    val navigator = remember {
+        object : Navigator {
+            override fun album(release: Release) {
+                expanded = false
+                stack.add(Route.Album(release))
+            }
 
-    LaunchedEffect(Unit) { library.scan() }
-    BackHandler(enabled = expanded || stack.size > 1) {
-        if (expanded) expanded = false else stack.removeAt(stack.lastIndex)
+            override fun playlist(id: String, title: String, cover: String?) {
+                expanded = false
+                stack.add(Route.Playlist(uniffi.digida_mobile.Playlist(id, title, "", cover, 0u)))
+            }
+
+            override fun artist(id: String, name: String) {
+                expanded = false
+                stack.add(Route.Artist(id, name))
+            }
+        }
     }
 
-    Box(Modifier.fillMaxSize()) {
-        Backdrop(palette)
-        Column(Modifier.fillMaxSize().statusBarsPadding()) {
-            AnimatedContent(
-                targetState = stack.last(),
-                modifier = Modifier.weight(1f),
-                transitionSpec = {
-                    val forward = targetState !is Route.Home
-                    val sign = if (forward) 1 else -1
-                    (slideInHorizontally(tween(380, easing = FastOutSlowInEasing)) { it / 4 * sign } +
-                        fadeIn(tween(300)) + scaleIn(tween(380), initialScale = 0.98f))
-                        .togetherWith(
-                            slideOutHorizontally(tween(380, easing = FastOutSlowInEasing)) { -it / 6 * sign } +
-                                fadeOut(tween(200))
+    LaunchedEffect(Unit) { library.scan() }
+    BackHandler(enabled = menu != null || expanded || stack.size > 1 || tab != Tab.Home) {
+        when {
+            menu != null -> menu = null
+            expanded -> expanded = false
+            stack.size > 1 -> back()
+            else -> {
+                tab = Tab.Home
+                stack.clear()
+                stack.add(Route.Feed)
+            }
+        }
+    }
+
+    CompositionLocalProvider(LocalSongMenu provides { song -> menu = song }, LocalLibrary provides library) {
+        Box(Modifier.fillMaxSize()) {
+            Backdrop(palette)
+            Column(Modifier.fillMaxSize().statusBarsPadding()) {
+                AnimatedContent(
+                    targetState = stack.last(),
+                    modifier = Modifier.weight(1f),
+                    transitionSpec = {
+                        val forward = stack.size > 1
+                        val sign = if (forward) 1 else -1
+                        (slideInHorizontally(tween(380, easing = FastOutSlowInEasing)) { it / 4 * sign } +
+                            fadeIn(tween(300)) + scaleIn(tween(380), initialScale = 0.98f))
+                            .togetherWith(
+                                slideOutHorizontally(tween(380, easing = FastOutSlowInEasing)) { -it / 6 * sign } +
+                                    fadeOut(tween(200))
+                            )
+                    },
+                    label = "route",
+                ) { route ->
+                    when (route) {
+                        Route.Feed -> HomeFeedScreen(library, navigator, onSettings = { stack.add(Route.Settings) })
+                        Route.Home -> HomeScreen(
+                            library,
+                            onAlbum = { stack.add(Route.Album(it)) },
+                            onPlaylist = { stack.add(Route.Playlist(it)) },
+                            onSearch = {
+                                tab = Tab.Search
+                                stack.clear()
+                                stack.add(Route.Search)
+                            },
+                            onSettings = { stack.add(Route.Settings) },
                         )
-                },
-                label = "route",
-            ) { route ->
-                when (route) {
-                    Route.Home -> HomeScreen(
-                        library,
-                        onAlbum = { stack.add(Route.Album(it)) },
-                        onPlaylist = { stack.add(Route.Playlist(it)) },
-                        onSearch = { stack.add(Route.Search) },
-                        onSettings = { stack.add(Route.Settings) },
-                    )
-                    is Route.Album -> AlbumScreen(library, route.release, onBack = { stack.removeAt(stack.lastIndex) })
-                    is Route.Playlist -> PlaylistScreen(library, route.playlist, onBack = { stack.removeAt(stack.lastIndex) })
-                    Route.Search -> {
-                        val status by library.status.collectAsStateWithLifecycle()
-                        SearchScreen(library, onBack = { stack.removeAt(stack.lastIndex) }) { songs, index ->
+                        is Route.Album -> AlbumScreen(library, route.release, onBack = back)
+                        is Route.Playlist -> PlaylistScreen(library, route.playlist, onBack = back)
+                        is Route.Artist -> ArtistScreen(library, route.id, route.name, navigator, onBack = back)
+                        Route.Search -> SearchScreen(library, onBack = if (stack.size > 1) back else null) { songs, index ->
                             SongRow(songs[index], playing = status.song?.id == songs[index].id) { library.play(songs, index) }
                         }
+                        Route.Settings -> SettingsScreen(library, preferences, onBack = back)
                     }
-                    Route.Settings -> SettingsScreen(library, preferences, onBack = { stack.removeAt(stack.lastIndex) })
+                }
+                AnimatedVisibility(
+                    visible = status.song != null,
+                    enter = slideInVertically(spring(dampingRatio = 0.8f)) { it } + fadeIn(),
+                    exit = slideOutVertically { it } + fadeOut(),
+                ) {
+                    MiniPlayer(status, library, onExpand = { expanded = true })
+                }
+                BottomBar(tab) { chosen ->
+                    if (chosen == tab && stack.size == 1) return@BottomBar
+                    tab = chosen
+                    stack.clear()
+                    stack.add(chosen.root())
                 }
             }
             AnimatedVisibility(
-                visible = status.song != null,
-                enter = slideInVertically(spring(dampingRatio = 0.8f)) { it } + fadeIn(),
-                exit = slideOutVertically { it } + fadeOut(),
+                visible = expanded && status.song != null,
+                enter = slideInVertically(spring(dampingRatio = 0.85f, stiffness = 380f)) { it } + fadeIn(),
+                exit = slideOutVertically(tween(320)) { it } + fadeOut(tween(320)),
             ) {
-                MiniPlayer(status, library, onExpand = { expanded = true })
+                PlayerScreen(status, library, onClose = { expanded = false })
             }
+            SongMenu(menu, library, navigator, onClose = { menu = null })
+            SignInPrompts(library)
         }
-        AnimatedVisibility(
-            visible = expanded && status.song != null,
-            enter = slideInVertically(spring(dampingRatio = 0.85f, stiffness = 380f)) { it } + fadeIn(),
-            exit = slideOutVertically(tween(320)) { it } + fadeOut(tween(320)),
-        ) {
-            PlayerScreen(status, library, onClose = { expanded = false })
-        }
-        SignInPrompts(library)
     }
 }
 
@@ -358,9 +416,21 @@ private fun SongList(songs: List<Song>, library: Library, header: @Composable ()
 
 @Composable
 internal fun SongRow(song: Song, playing: Boolean, onClick: () -> Unit) {
+    val library = LocalLibrary.current
+    when (library) {
+        null -> SongCard(song, playing, onClick)
+        else -> SwipeToQueue(song, library) { SongCard(song, playing, onClick) }
+    }
+}
+
+/** One song in a list: its cover, title, artist and length, its menu on a long press. */
+@Composable
+private fun SongCard(song: Song, playing: Boolean, onClick: () -> Unit) {
     val palette = LocalPalette.current
+    val menu = LocalSongMenu.current
     Pressable(
         onClick = onClick,
+        onLongClick = { menu(song) },
         modifier = Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 5.dp),
         depth = Depth.Low,
         selected = playing,
@@ -454,8 +524,7 @@ private fun MiniPlayer(status: Status, library: Library, onExpand: () -> Unit) {
         onClick = onExpand,
         modifier = Modifier
             .fillMaxWidth()
-            .navigationBarsPadding()
-            .padding(horizontal = 12.dp, vertical = 10.dp)
+            .padding(start = 12.dp, end = 12.dp, top = 8.dp)
             .pointerInput(Unit) {
                 detectHorizontalDragGestures(
                     onDragEnd = {
@@ -504,6 +573,9 @@ private fun PlayerScreen(status: Status, library: Library, onClose: () -> Unit) 
         label = "breathe",
     )
     var scrub by remember { mutableStateOf<Float?>(null) }
+    var panel by remember { mutableStateOf<Panel?>(null) }
+    val songMenu = LocalSongMenu.current
+    BackHandler(enabled = panel != null) { panel = null }
     val duration = status.durationMs.toFloat().coerceAtLeast(1f)
     val position = scrub ?: status.positionMs.toFloat()
 
@@ -568,10 +640,33 @@ private fun PlayerScreen(status: Status, library: Library, onClose: () -> Unit) 
                 )
                 IconPill(Icons.Rounded.SkipNext, stringResource(R.string.next), library::next, size = 60.dp)
             }
-            Spacer(Modifier.height(36.dp))
+            Spacer(Modifier.height(18.dp))
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
+                IconPill(Icons.Rounded.Lyrics, stringResource(R.string.lyrics), { panel = Panel.Lyrics }, size = 46.dp)
+                IconPill(Icons.Rounded.MoreHoriz, stringResource(R.string.more), { songMenu(song) }, size = 46.dp)
+                IconPill(Icons.AutoMirrored.Rounded.QueueMusic, stringResource(R.string.queue), { panel = Panel.Queue }, size = 46.dp)
+            }
+            Spacer(Modifier.height(24.dp))
+        }
+        // the queue and the lyrics rise over the player, which stays playing underneath
+        AnimatedVisibility(
+            visible = panel != null,
+            enter = slideInVertically(spring(dampingRatio = 0.85f, stiffness = 420f)) { it } + fadeIn(),
+            exit = slideOutVertically(tween(280)) { it } + fadeOut(tween(280)),
+        ) {
+            Box(Modifier.fillMaxSize().background(palette.page.copy(alpha = 0.94f)).statusBarsPadding().navigationBarsPadding()) {
+                when (panel) {
+                    Panel.Queue -> QueuePanel(status, library) { panel = null }
+                    Panel.Lyrics -> LyricsPanel(status, library) { panel = null }
+                    null -> Unit
+                }
+            }
         }
     }
 }
+
+/** What can rise over the player. */
+private enum class Panel { Queue, Lyrics }
 
 /** A seek track sunk into the page with a raised knob that follows the finger. */
 @Composable

@@ -63,4 +63,20 @@
     <string name="refresh_log">Refresh</string>
     <string name="copy_log">Copy log</string>
     <string name="empty_service">Nothing saved to this library yet. Search to find music, or save some in the service\'s own app.</string>
+    <string name="home">Home</string>
+    <string name="listen_again">Listen again</string>
+    <string name="quick_picks">Quick picks</string>
+    <string name="shuffle_everything">Shuffle everything</string>
+    <string name="popular">Popular</string>
+    <string name="about_artist">About</string>
+    <string name="play_next">Play next</string>
+    <string name="add_to_queue">Add to queue</string>
+    <string name="go_to_album">Go to album</string>
+    <string name="go_to_artist">Go to artist</string>
+    <string name="like">Add to liked songs</string>
+    <string name="queue">Queue</string>
+    <string name="lyrics">Lyrics</string>
+    <string name="no_lyrics">No lyrics found for this song.</string>
+    <string name="lyrics_source">Lyrics from %1$s</string>
+    <string name="more">More</string>
 </resources>
