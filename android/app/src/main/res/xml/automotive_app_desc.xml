@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Tells Android Auto that DIGIDA is a media app it can browse and play from. -->
+<automotiveApp>
+    <uses name="media" />
+</automotiveApp>

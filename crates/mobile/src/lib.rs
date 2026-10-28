@@ -4,6 +4,9 @@
 //! app makes them off its main thread; what playback and sign-in do arrives at the
 //! [`Listener`].
 
+mod links;
+mod scrobbling;
+
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -28,6 +31,8 @@ const RESTART: Duration = Duration::from_secs(3);
 /// The slug of the provider that plays files on the phone.
 const LOCAL: &str = "local";
 const SPOTIFY: &str = "spotify";
+/// The name a scrobbling service's approval page is asked for under.
+const SCROBBLING: &str = "scrobbling";
 const YOUTUBE: &str = "youtube";
 /// How far apart two recordings' lengths may be and still be the same song, in milliseconds.
 const MATCH_LENGTH: u64 = 15_000;
@@ -322,6 +327,8 @@ struct Shared {
     spotify: Arc<music::spotify::SpotifyProvider>,
     /// The core's runtime, for the match a stand-in song waits on.
     handle: tokio::runtime::Handle,
+    /// The linked scrobbling accounts and the listen playing now.
+    scrobbles: Mutex<scrobbling::Scrobbles>,
 }
 
 /// A station of songs like a seed: its provider, the seed, and where its next stretch begins,
@@ -436,7 +443,7 @@ impl Digida {
         };
 
         let handle = runtime.handle().clone();
-        Ok(Arc::new(Self {
+        let core = Arc::new(Self {
             runtime,
             shared: Arc::new(Shared {
                 slots: Mutex::new(slots),
@@ -449,6 +456,7 @@ impl Digida {
                 stop_at_end: std::sync::atomic::AtomicBool::new(false),
                 spotify,
                 handle,
+                scrobbles: Mutex::new(scrobbling::Scrobbles::load(data.join("scrobbling.json"))),
             }),
             active: Mutex::new(LOCAL.to_owned()),
             answers: Mutex::new(None),
@@ -457,7 +465,23 @@ impl Digida {
             headphones: Mutex::new(None),
             cache,
             config,
-        }))
+        });
+        // a scrobbling service's approval page opens in the app's browser tab, as a sign-in's does
+        let shared = Arc::downgrade(&core.shared);
+        music::scrobble::set_opener(move |url| {
+            let listener = shared
+                .upgrade()
+                .and_then(|shared| lock(&shared.listener).clone());
+            if let Some(listener) = listener {
+                listener.prompt(
+                    SCROBBLING.to_owned(),
+                    Prompt::Url {
+                        url: url.to_owned(),
+                    },
+                );
+            }
+        });
+        Ok(core)
     }
 
     /// Hands the core the one listener it tells about playback and sign-in, replacing any
@@ -1284,9 +1308,11 @@ fn listen(
             }
             let changed = fold(&mut lock(&shared.status), &event);
             if changed {
+                scrobbling::heard(&shared, lock(&shared.status).position_ms);
                 tell(&shared);
             }
             if ended {
+                scrobbling::finish(&shared);
                 // the sleep timer's end of song pauses here, ready to carry on from the next one
                 if shared
                     .stop_at_end
@@ -1429,6 +1455,7 @@ fn load_current(shared: &Arc<Shared>) {
         status.song = Some(song.clone());
     }
     tell(shared);
+    scrobbling::started(shared, &song);
 
     let player = lock(&shared.slots)
         .get(&engine)
@@ -1875,6 +1902,12 @@ fn logging() {
     if log::set_logger(Box::leak(Box::new(recorder))).is_ok() {
         log::set_max_level(log::LevelFilter::Info);
     }
+}
+
+/// The changelog the app was built with, in Keep a Changelog's Markdown.
+#[uniffi::export]
+pub fn changelog() -> String {
+    include_str!("../../../CHANGELOG.md").to_owned()
 }
 
 /// The latest lines of the core's log, oldest first, for the diagnostics screen.

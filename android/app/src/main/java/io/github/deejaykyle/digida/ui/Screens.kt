@@ -80,6 +80,7 @@ import io.github.deejaykyle.digida.Library
 import io.github.deejaykyle.digida.Preferences
 import io.github.deejaykyle.digida.R
 import uniffi.digida_mobile.PlayState
+import uniffi.digida_mobile.Opened
 import uniffi.digida_mobile.Release
 import uniffi.digida_mobile.Song
 import uniffi.digida_mobile.Status
@@ -93,6 +94,7 @@ sealed interface Route {
     data class Playlist(val playlist: uniffi.digida_mobile.Playlist) : Route
     data class Artist(val id: String, val name: String) : Route
     data object Settings : Route
+    data class SettingsSection(val page: SettingsPage) : Route
     data object Equalizer : Route
 }
 
@@ -136,6 +138,34 @@ fun App(library: Library, preferences: Preferences) {
     }
 
     LaunchedEffect(Unit) { library.scan() }
+    // a link shared to the app plays its song, or opens its album, artist or playlist
+    val link by library.link.collectAsStateWithLifecycle()
+    LaunchedEffect(link) {
+        val wanted = library.takeLink() ?: return@LaunchedEffect
+        library.openLink(wanted)
+            .onSuccess { opened ->
+                when (opened) {
+                    is Opened.PlaySong -> {
+                        library.play(listOf(opened.song), 0)
+                        expanded = true
+                    }
+                    is Opened.ShowAlbum -> {
+                        library.show(opened.provider)
+                        navigator.album(opened.release)
+                    }
+                    is Opened.ShowArtist -> {
+                        library.show(opened.provider)
+                        navigator.artist(opened.id, opened.name)
+                    }
+                    is Opened.ShowPlaylist -> {
+                        library.show(opened.provider)
+                        expanded = false
+                        stack.add(Route.Playlist(opened.playlist))
+                    }
+                }
+            }
+            .onFailure { library.report(it.message) }
+    }
     BackHandler(enabled = menu != null || expanded || stack.size > 1 || tab != Tab.Home) {
         when {
             menu != null -> menu = null
@@ -190,7 +220,17 @@ fun App(library: Library, preferences: Preferences) {
                         Route.Settings -> SettingsScreen(
                             library,
                             preferences,
+                            page = null,
                             onBack = back,
+                            onOpen = { stack.add(Route.SettingsSection(it)) },
+                            onEqualizer = { stack.add(Route.Equalizer) },
+                        )
+                        is Route.SettingsSection -> SettingsScreen(
+                            library,
+                            preferences,
+                            page = route.page,
+                            onBack = back,
+                            onOpen = { stack.add(Route.SettingsSection(it)) },
                             onEqualizer = { stack.add(Route.Equalizer) },
                         )
                         Route.Equalizer -> EqualizerScreen(library, onBack = back)
@@ -716,7 +756,14 @@ private fun Seeker(fraction: Float, onScrub: (Float) -> Unit, onRelease: () -> U
 }
 
 @Composable
-private fun SettingsScreen(library: Library, preferences: Preferences, onBack: () -> Unit, onEqualizer: () -> Unit) {
+private fun SettingsScreen(
+    library: Library,
+    preferences: Preferences,
+    page: SettingsPage?,
+    onBack: () -> Unit,
+    onOpen: (SettingsPage) -> Unit,
+    onEqualizer: () -> Unit,
+) {
     val palette = LocalPalette.current
     val finish by preferences.finish.collectAsStateWithLifecycle()
     val mode by preferences.mode.collectAsStateWithLifecycle()
@@ -724,8 +771,10 @@ private fun SettingsScreen(library: Library, preferences: Preferences, onBack: (
     var draft by remember { mutableStateOf("") }
 
     Column(Modifier.fillMaxSize()) {
-        TopBar(stringResource(R.string.settings), onBack = onBack)
+        TopBar(stringResource(page?.title ?: R.string.settings), onBack = onBack)
         LazyColumn(contentPadding = PaddingValues(horizontal = 18.dp, vertical = 8.dp)) {
+            if (page == null) settingsIndex(onOpen)
+            if (page == SettingsPage.Appearance) {
             item { Heading(stringResource(R.string.style), stringResource(R.string.style_detail)) }
             item {
                 Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
@@ -748,6 +797,8 @@ private fun SettingsScreen(library: Library, preferences: Preferences, onBack: (
                     onSelect = { preferences.setMode(Mode.entries[it]) },
                 )
             }
+            }
+            if (page == SettingsPage.Player) {
             item { Heading(stringResource(R.string.playback), null) }
             item { PlaybackSettings(library, preferences) }
             item {
@@ -772,8 +823,16 @@ private fun SettingsScreen(library: Library, preferences: Preferences, onBack: (
                     }
                 }
             }
+            }
+            if (page == SettingsPage.Accounts) {
             item { Heading(stringResource(R.string.accounts), stringResource(R.string.accounts_detail)) }
             item { Accounts(library) }
+            }
+            if (page == SettingsPage.Integrations) {
+            item { Heading(stringResource(R.string.scrobbling), stringResource(R.string.scrobbling_detail)) }
+            item { Scrobbling(library) }
+            }
+            if (page == SettingsPage.Storage) {
             item { Heading(stringResource(R.string.folders), stringResource(R.string.folders_detail)) }
             itemsIndexed(folders) { _, folder ->
                 Row(
@@ -835,13 +894,22 @@ private fun SettingsScreen(library: Library, preferences: Preferences, onBack: (
                     }
                 }
             }
+            item { Heading(stringResource(R.string.cache), stringResource(R.string.cache_detail)) }
+            item { CacheSection() }
+            }
+            if (page == SettingsPage.Backup) {
+            item { Heading(stringResource(R.string.backup), stringResource(R.string.backup_detail)) }
+            item { BackupSection(preferences) }
+            }
+            if (page == SettingsPage.About) {
+            item { AboutSection() }
+            item { Heading(stringResource(R.string.supported_links), stringResource(R.string.supported_links_detail)) }
             item { Heading(stringResource(R.string.diagnostics), stringResource(R.string.diagnostics_detail)) }
             item { Diagnostics() }
-            item {
-                Spacer(Modifier.height(18.dp))
-                Label(stringResource(R.string.about), size = 12.sp, subtle = true, lines = 3)
-                Spacer(Modifier.height(40.dp))
+            item { Heading(stringResource(R.string.changelog), null) }
+            item { Changelog() }
             }
+            item { Spacer(Modifier.height(120.dp)) }
         }
     }
 }

@@ -147,6 +147,30 @@ pub trait Service: Send + Sync {
     async fn scrobble(&self, account: &Account, plays: &[Play]) -> Result<()>;
 }
 
+/// What opens a service's approval page, for an app with no desktop browser to hand it to.
+type Opener = Box<dyn Fn(&str) + Send + Sync>;
+
+/// Hands every approval page to `opener` rather than the desktop's browser. An app sets it once,
+/// before linking any account; a second call changes nothing.
+pub fn set_opener(opener: impl Fn(&str) + Send + Sync + 'static) {
+    opener_slot().get_or_init(|| Box::new(opener));
+}
+
+fn opener_slot() -> &'static OnceLock<Opener> {
+    static OPENER: OnceLock<Opener> = OnceLock::new();
+    &OPENER
+}
+
+/// Opens `url` for the user to approve the link, through the app's opener when it set one.
+fn open_page(url: &str) {
+    match opener_slot().get() {
+        Some(opener) => opener(url),
+        None => {
+            open::that_in_background(url);
+        }
+    }
+}
+
 /// The one http client every service shares, so they pool connections and reuse TLS sessions
 /// between them rather than each holding its own.
 fn http() -> &'static reqwest::Client {

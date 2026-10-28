@@ -4,16 +4,18 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
-import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
-import android.os.IBinder
+import android.os.Bundle
+import android.support.v4.media.MediaBrowserCompat
+import android.support.v4.media.MediaDescriptionCompat
 import android.support.v4.media.session.MediaSessionCompat
 import android.support.v4.media.session.PlaybackStateCompat
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
+import androidx.media.MediaBrowserServiceCompat
 import androidx.media.app.NotificationCompat.MediaStyle
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -27,16 +29,15 @@ import uniffi.digida_mobile.Status
 
 /**
  * Keeps the process alive while music plays, with the media notification and a media session
- * so the lock screen, headphones and the quick settings player can drive the queue.
+ * so the lock screen, headphones and the quick settings player can drive the queue. It is also
+ * the media browser Android Auto binds to, listing the queue and the library on the car's screen.
  */
-class PlaybackService : Service() {
+class PlaybackService : MediaBrowserServiceCompat() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private lateinit var session: MediaSessionCompat
     private val library get() = (application as DigidaApp).library
     /** The cover the widget last drew, and the song it belongs to, so a tick never reloads it. */
     private var cover: Pair<String?, android.graphics.Bitmap?> = null to null
-
-    override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -51,15 +52,11 @@ class PlaybackService : Service() {
                 override fun onSkipToNext() = library.next()
                 override fun onSkipToPrevious() = library.previous()
                 override fun onSeekTo(pos: Long) = library.seek(pos)
+                override fun onPlayFromMediaId(mediaId: String?, extras: Bundle?) = playFrom(mediaId)
             })
             isActive = true
         }
-        ServiceCompat.startForeground(
-            this,
-            NOTIFICATION,
-            notification(library.status.value),
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK else 0,
-        )
+        sessionToken = session.sessionToken
         scope.launch {
             library.status
                 .map { Triple(it.state, it.song?.id, it.positionMs / 1000u) }
@@ -76,6 +73,14 @@ class PlaybackService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // started in the foreground by the app, a notification button or the widget; a car that
+        // only binds to browse leaves the service in the background until something plays
+        ServiceCompat.startForeground(
+            this,
+            NOTIFICATION,
+            notification(library.status.value),
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK else 0,
+        )
         when (intent?.action) {
             ACTION_TOGGLE -> library.toggle()
             ACTION_NEXT -> library.next()
@@ -83,6 +88,57 @@ class PlaybackService : Service() {
         }
         return START_NOT_STICKY
     }
+
+    override fun onGetRoot(clientPackageName: String, clientUid: Int, rootHints: Bundle?): MediaBrowserServiceCompat.BrowserRoot =
+        MediaBrowserServiceCompat.BrowserRoot(ROOT, null)
+
+    override fun onLoadChildren(parentId: String, result: MediaBrowserServiceCompat.Result<MutableList<MediaBrowserCompat.MediaItem>>) {
+        when (parentId) {
+            ROOT -> result.sendResult(
+                mutableListOf(
+                    folder(QUEUE, getString(R.string.queue)),
+                    folder(SONGS, getString(R.string.songs)),
+                )
+            )
+            QUEUE -> {
+                result.detach()
+                scope.launch {
+                    val songs = runCatching { library.queue() }.getOrDefault(emptyList())
+                    result.sendResult(songs.mapIndexed { at, song -> playable("$QUEUE/$at", song) }.toMutableList())
+                }
+            }
+            SONGS -> result.sendResult(
+                library.shelf.value.songs.take(BROWSE_LIMIT)
+                    .mapIndexed { at, song -> playable("$SONGS/$at", song) }.toMutableList()
+            )
+            else -> result.sendResult(mutableListOf())
+        }
+    }
+
+    /** Plays what a car picked: a place in the queue, or the library's songs from one of them. */
+    private fun playFrom(mediaId: String?) {
+        val (list, at) = mediaId?.split('/')?.takeIf { it.size == 2 } ?: return
+        val index = at.toIntOrNull() ?: return
+        when (list) {
+            QUEUE -> library.jump(index)
+            SONGS -> library.play(library.shelf.value.songs.take(BROWSE_LIMIT), index)
+        }
+    }
+
+    private fun folder(id: String, title: String) = MediaBrowserCompat.MediaItem(
+        MediaDescriptionCompat.Builder().setMediaId(id).setTitle(title).build(),
+        MediaBrowserCompat.MediaItem.FLAG_BROWSABLE,
+    )
+
+    private fun playable(id: String, song: uniffi.digida_mobile.Song) = MediaBrowserCompat.MediaItem(
+        MediaDescriptionCompat.Builder()
+            .setMediaId(id)
+            .setTitle(song.title)
+            .setSubtitle(song.artist)
+            .setIconUri(song.cover?.let { android.net.Uri.parse(it) })
+            .build(),
+        MediaBrowserCompat.MediaItem.FLAG_PLAYABLE,
+    )
 
     override fun onDestroy() {
         scope.cancel()
@@ -159,6 +215,12 @@ class PlaybackService : Service() {
         const val ACTION_TOGGLE = "toggle"
         const val ACTION_NEXT = "next"
         const val ACTION_PREVIOUS = "previous"
+        /** The car's browse tree: a root holding the queue and the library's songs. */
+        private const val ROOT = "root"
+        private const val QUEUE = "queue"
+        private const val SONGS = "songs"
+        /** How many songs a car lists, which keeps the list quick to scroll while driving. */
+        private const val BROWSE_LIMIT = 200
 
         /**
          * What a notification or widget button sends: the service, started in the foreground so

@@ -11,6 +11,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - On Android, a Spotify account without Premium now signs in. Browse your Spotify library,
   playlists and search, and each song plays from its match on YouTube Music.
+- Android settings are now grouped into pages: Appearance, Player and audio, Accounts,
+  Integrations, Storage, Backup and restore, and About with the changelog.
+- Scrobble what you play on Android to Last.fm, Libre.fm, ListenBrainz or Maloja.
+- Open or share a Spotify, YouTube, Deezer, Tidal or Apple Music link to DIGIDA on Android to
+  play the song or open the album, artist or playlist.
+- DIGIDA works with Android Auto: browse the queue and your songs from the car's screen.
+- Save your Android settings to a file and restore them on another phone, and clear the cover
+  cache under Storage.
 
 ### Fixed
 

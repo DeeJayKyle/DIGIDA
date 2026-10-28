@@ -19,6 +19,8 @@ import uniffi.digida_mobile.ArtistPage
 import uniffi.digida_mobile.Digida
 import uniffi.digida_mobile.Feed
 import uniffi.digida_mobile.Headphone
+import uniffi.digida_mobile.Opened
+import uniffi.digida_mobile.Scrobbler
 import uniffi.digida_mobile.Words
 import uniffi.digida_mobile.Listener
 import uniffi.digida_mobile.Method
@@ -271,6 +273,46 @@ class Library(private val context: Context, private val preferences: Preferences
         }
     }
 
+    private val _scrobblers = MutableStateFlow(core.scrobblers())
+    /** The scrobbling services and how each is linked. */
+    val scrobblers: StateFlow<List<Scrobbler>> = _scrobblers.asStateFlow()
+
+    /** Links a scrobbling service with what its row collected, waiting for any approval page. */
+    suspend fun linkScrobbler(id: String, key: String, secret: String, token: String, url: String): Result<Unit> =
+        withContext(Dispatchers.IO) {
+            runCatching { core.linkScrobbler(id, key, secret, token, url) }
+                .also { _scrobblers.value = core.scrobblers() }
+        }
+
+    fun unlinkScrobbler(id: String) {
+        core.unlinkScrobbler(id)
+        _scrobblers.value = core.scrobblers()
+    }
+
+    fun setScrobblerEnabled(id: String, on: Boolean) {
+        core.setScrobblerEnabled(id, on)
+        _scrobblers.value = core.scrobblers()
+    }
+
+    private val _link = MutableStateFlow<String?>(null)
+    /** A link the app was handed to open, until the screens take it. */
+    val link: StateFlow<String?> = _link.asStateFlow()
+
+    fun offerLink(link: String?) {
+        if (link != null) _link.value = link
+    }
+
+    /** Takes the link waiting to be opened, so it opens once. */
+    fun takeLink(): String? = _link.value.also { _link.value = null }
+
+    /** Says why a link could not be opened, along the bottom. */
+    fun report(problem: String?) {
+        _problem.value = problem
+    }
+
+    /** What a shared link points at, from the service it belongs to. */
+    suspend fun openLink(link: String): Result<Opened> = withContext(Dispatchers.IO) { runCatching { core.openLink(link) } }
+
     /** Turns the equalizer on or off. */
     fun setEqualizer(on: Boolean) = changeSound(_sound.value.copy(enabled = on))
 
@@ -452,6 +494,38 @@ class Preferences(context: Context) {
             .putString("eq_headphone", sound.headphone)
             .putString("eq_profile", sound.profile)
             .apply()
+    }
+
+    /**
+     * Every choice as JSON, for a backup. Sign-ins and scrobbling keys are not among them: they
+     * stay on the phone they were made on.
+     */
+    fun export(): String {
+        val json = org.json.JSONObject()
+        store.all.forEach { (key, value) ->
+            when (value) {
+                is Set<*> -> json.put(key, org.json.JSONArray(value.toList()))
+                else -> json.put(key, value)
+            }
+        }
+        return json.toString(2)
+    }
+
+    /** Takes every choice from a backup [export] made. They apply once DIGIDA starts again. */
+    fun restore(text: String) {
+        val json = org.json.JSONObject(text)
+        val edit = store.edit()
+        json.keys().forEach { key ->
+            when (val value = json.get(key)) {
+                is Boolean -> edit.putBoolean(key, value)
+                is Int -> edit.putInt(key, value)
+                is Long -> edit.putLong(key, value)
+                is Double -> edit.putFloat(key, value.toFloat())
+                is org.json.JSONArray -> edit.putStringSet(key, (0 until value.length()).map { value.getString(it) }.toSet())
+                else -> edit.putString(key, value.toString())
+            }
+        }
+        edit.apply()
     }
 
     fun setFolders(folders: List<String>) {
