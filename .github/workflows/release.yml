@@ -148,6 +148,7 @@ jobs:
           test -s notes.md || echo "DIGIDA $TAG" > notes.md
 
       - name: draft the release
+        id: draft
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.TAG }}
@@ -159,7 +160,11 @@ jobs:
           prerelease: ${{ contains(env.TAG, '-') }}
           fail_on_unmatched_files: true
 
+      # by id, since a draft has no tag yet for a lookup by tag to find
       - name: publish the release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest
+          ID: ${{ steps.draft.outputs.id }}
+        run: |
+          gh api -X PATCH "repos/$GITHUB_REPOSITORY/releases/$ID" \
+            -F draft=false -f make_latest=true --jq .html_url
