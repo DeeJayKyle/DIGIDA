@@ -123,19 +123,22 @@ class Library(private val context: Context, private val preferences: Preferences
         scope.launch { rescan() }
     }
 
+    /** Scans the local folders, and refreshes the screen only while local files are on it. */
     private fun rescan() {
-        _shelf.value = _shelf.value.copy(loading = true, error = null)
+        if (_active.value == LOCAL) _shelf.value = _shelf.value.copy(loading = true, error = null)
         val failed = runCatching { core.scan(preferences.folders.ifEmpty { defaultFolders() }) }
             .exceptionOrNull()
         _services.value = core.services()
-        if (_active.value == LOCAL) load() else if (failed != null) {
-            _shelf.value = _shelf.value.copy(loading = false, error = failed.message)
+        if (_active.value != LOCAL) return
+        when (failed) {
+            null -> load(LOCAL)
+            else -> _shelf.value = _shelf.value.copy(loading = false, error = failed.message)
         }
     }
 
     /** Shows `slug`'s library on the library screens and loads it. */
-    fun show(slug: String) {
-        if (_active.value == slug && _shelf.value.error == null && !_shelf.value.loading) return
+    fun show(slug: String, reload: Boolean = false) {
+        if (!reload && _active.value == slug && _shelf.value.error == null && !_shelf.value.loading) return
         _active.value = slug
         core.setActive(slug)
         val guest = slug != LOCAL && _services.value.any { it.slug == slug && it.signedIn && !it.authenticated }
@@ -144,15 +147,18 @@ class Library(private val context: Context, private val preferences: Preferences
             return
         }
         _shelf.value = Shelf(loading = true)
-        scope.launch { load() }
+        scope.launch { load(slug) }
     }
 
-    /** Loads the shown library's albums, songs and playlists. A part that fails is left empty. */
-    private fun load() {
-        _shelf.value = _shelf.value.copy(loading = true, error = null)
+    /**
+     * Loads `slug`'s albums, songs and playlists, showing them only if `slug` is still the
+     * library on screen once they arrive. A part that fails is left empty.
+     */
+    private fun load(slug: String) {
         val albums = runCatching { core.albums() }
         val songs = runCatching { core.songs() }
         val playlists = runCatching { core.playlists() }
+        if (_active.value != slug) return
         _shelf.value = Shelf(
             albums = albums.getOrDefault(emptyList()),
             songs = songs.getOrDefault(emptyList()),
@@ -181,7 +187,7 @@ class Library(private val context: Context, private val preferences: Preferences
                     Intent(context, MainActivity::class.java)
                         .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
                 )
-                show(slug)
+                show(slug, reload = true)
             }
         }
     }
