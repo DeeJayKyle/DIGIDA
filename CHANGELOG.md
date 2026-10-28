@@ -7,6 +7,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- On Android, a Spotify account without Premium now signs in. Browse your Spotify library,
+  playlists and search, and each song plays from its match on YouTube Music.
+
+### Fixed
+
+- Android sign-ins and the headphone search reach the internet again, and the lyrics and queue
+  panels no longer show the player through them.
+
 ## [1.0.0] - 2026-10-26
 
 The first release of DIGIDA, a fork of Sonora 0.44.2.

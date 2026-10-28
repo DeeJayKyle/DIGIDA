@@ -37,11 +37,28 @@ pub use lyrics::SpotifyLyrics;
 
 pub struct SpotifyProvider {
     config: AuthConfig,
+    /// Whether the account signed in last has no Premium, so its songs cannot play here.
+    free: std::sync::atomic::AtomicBool,
 }
 
 impl SpotifyProvider {
     pub fn new(config: AuthConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            free: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    /// Keeps an account without Premium signed in for its library, for an app that plays the
+    /// songs from another service and asks [`Self::free`] when it should.
+    pub fn keeping_free(mut self) -> Self {
+        self.config.free = true;
+        self
+    }
+
+    /// Whether the account signed in now has no Premium, so librespot will not play for it.
+    pub fn free(&self) -> bool {
+        self.free.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     pub fn from_env() -> Self {
@@ -59,6 +76,10 @@ impl SpotifyProvider {
     }
 
     async fn session(&self, client: LibrespotClient) -> Result<ProviderSession> {
+        self.free.store(
+            !auth::is_premium(client.session()),
+            std::sync::atomic::Ordering::Relaxed,
+        );
         let profile = client.profile().await?;
         let playback = Arc::new(Factory::new(client.session().clone()));
         Ok(ProviderSession {

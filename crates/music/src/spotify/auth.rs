@@ -42,6 +42,9 @@ pub struct AuthConfig {
     pub client_id: String,
     pub redirect_uri: String,
     pub cache_dir: PathBuf,
+    /// Whether an account without Premium stays signed in, for an app that browses its library
+    /// here and plays its songs from another service. Off, such an account is refused.
+    pub free: bool,
 }
 
 impl Default for AuthConfig {
@@ -50,6 +53,7 @@ impl Default for AuthConfig {
             client_id: DEFAULT_CLIENT_ID.to_owned(),
             redirect_uri: DEFAULT_REDIRECT_URI.to_owned(),
             cache_dir: credentials::dir("spotify"),
+            free: false,
         }
     }
 }
@@ -104,7 +108,7 @@ pub async fn restore(config: &AuthConfig) -> Result<Option<Session>> {
 
     session.connect(credentials, true).await.map_err(denied)?;
     credentials::secure(&config.file());
-    premium(&session).await?;
+    premium(&session, config.free).await?;
     Ok(Some(session))
 }
 
@@ -121,7 +125,7 @@ pub async fn login(config: &AuthConfig, prompt: PromptSink) -> Result<Session> {
         .await
         .map_err(denied)?;
     credentials::secure(&config.file());
-    premium(&session).await?;
+    premium(&session, config.free).await?;
     Ok(session)
 }
 
@@ -206,12 +210,18 @@ fn exchange(request: oauth2::HttpRequest) -> Result<oauth2::HttpResponse, reqwes
     })
 }
 
-async fn premium(session: &Session) -> Result<()> {
+/// Refuses an account without Premium, which librespot cannot play for, unless `free` keeps it
+/// for browsing alone.
+async fn premium(session: &Session, free: bool) -> Result<()> {
     let deadline = tokio::time::Instant::now() + PRODUCT_WAIT;
     loop {
         if let Some(account) = session.user_data().attributes.get("type") {
             match account.as_str() {
                 "premium" => return Ok(()),
+                _ if free => {
+                    log::info!("spotify: the account has no Premium, so it is kept for browsing");
+                    return Ok(());
+                }
                 _ => {
                     session.shutdown();
                     return Err(anyhow::Error::new(SignInFailure(SignInProblem::Premium)));
@@ -223,6 +233,16 @@ async fn premium(session: &Session) -> Result<()> {
         }
         tokio::time::sleep(PRODUCT_POLL).await;
     }
+}
+
+/// Whether `session` belongs to a Premium account, which is the only kind librespot plays for.
+/// An account whose product has not arrived yet counts as Premium, as sign-in does.
+pub fn is_premium(session: &Session) -> bool {
+    session
+        .user_data()
+        .attributes
+        .get("type")
+        .is_none_or(|account| account == "premium")
 }
 
 fn denied(error: librespot_core::Error) -> anyhow::Error {

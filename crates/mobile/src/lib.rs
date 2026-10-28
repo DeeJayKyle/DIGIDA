@@ -27,6 +27,10 @@ const POSITION_INTERVAL: Duration = Duration::from_millis(250);
 const RESTART: Duration = Duration::from_secs(3);
 /// The slug of the provider that plays files on the phone.
 const LOCAL: &str = "local";
+const SPOTIFY: &str = "spotify";
+const YOUTUBE: &str = "youtube";
+/// How far apart two recordings' lengths may be and still be the same song, in milliseconds.
+const MATCH_LENGTH: u64 = 15_000;
 /// How many bands the graphic equalizer has.
 const BANDS: usize = 10;
 /// Where AutoEq's results are read from.
@@ -313,6 +317,11 @@ struct Shared {
     autoplay: std::sync::atomic::AtomicBool,
     /// Whether playback stops when the song playing ends, for the sleep timer's end of song.
     stop_at_end: std::sync::atomic::AtomicBool,
+    /// Spotify, asked whether its account has Premium. Without it, Spotify's songs play from
+    /// their match on YouTube Music.
+    spotify: Arc<music::spotify::SpotifyProvider>,
+    /// The core's runtime, for the match a stand-in song waits on.
+    handle: tokio::runtime::Handle,
 }
 
 /// A station of songs like a seed: its provider, the seed, and where its next stretch begins,
@@ -377,6 +386,8 @@ impl Digida {
 
         // Providers read their settings from the environment as on the desktop, so they are
         // built on the runtime that some of them start tasks on.
+        // an account without Premium is kept for its library, and its songs play from YouTube
+        let spotify = Arc::new(music::spotify::SpotifyProvider::from_env().keeping_free());
         let providers: Vec<Arc<dyn MusicProvider>> = runtime.block_on(async {
             vec![
                 Arc::new(LocalProvider::new(
@@ -384,7 +395,7 @@ impl Digida {
                     Database::at(data.join("state.sqlite")),
                     Cache::at(cache.join("cache.sqlite")),
                 )) as Arc<dyn MusicProvider>,
-                Arc::new(music::spotify::SpotifyProvider::from_env()),
+                spotify.clone() as Arc<dyn MusicProvider>,
                 Arc::new(music::youtube::YouTubeProvider::new()),
                 Arc::new(music::apple::AppleProvider::new()),
                 Arc::new(music::deezer::DeezerProvider::new()),
@@ -424,6 +435,7 @@ impl Digida {
             vault: None,
         };
 
+        let handle = runtime.handle().clone();
         Ok(Arc::new(Self {
             runtime,
             shared: Arc::new(Shared {
@@ -435,6 +447,8 @@ impl Digida {
                 station: Mutex::new(None),
                 autoplay: std::sync::atomic::AtomicBool::new(true),
                 stop_at_end: std::sync::atomic::AtomicBool::new(false),
+                spotify,
+                handle,
             }),
             active: Mutex::new(LOCAL.to_owned()),
             answers: Mutex::new(None),
@@ -1208,6 +1222,36 @@ impl Digida {
         if let Some(events) = started {
             listen(&self.runtime, self.shared.clone(), slug.to_owned(), events);
         }
+        if slug == SPOTIFY && self.shared.spotify.free() {
+            self.stand_in_ready();
+        }
+    }
+
+    /// Signs YouTube Music in as a guest when nothing else has, so a Spotify account without
+    /// Premium has somewhere to play its songs from.
+    fn stand_in_ready(&self) {
+        let provider = {
+            let slots = lock(&self.shared.slots);
+            let Some(slot) = slots.get(YOUTUBE) else {
+                return;
+            };
+            if slot.session.is_some() {
+                return;
+            }
+            slot.provider.clone()
+        };
+        let (_answers, input) = tokio::sync::mpsc::unbounded_channel();
+        let prompt: music::PromptSink = Arc::new(|_| {});
+        match self
+            .runtime
+            .block_on(provider.sign_in(SignIn::Anonymous, prompt, input))
+        {
+            Ok(session) => {
+                log::info!("mobile: youtube is signed in as a guest to play spotify's songs");
+                self.keep(YOUTUBE, session);
+            }
+            Err(error) => log::warn!("mobile: cannot sign youtube in as a guest: {error:#}"),
+        }
     }
 }
 
@@ -1349,7 +1393,7 @@ fn current_player(shared: &Shared) -> Option<Arc<dyn Player>> {
 
 /// Loads the queue's current song into its provider's engine, pausing another provider's
 /// engine that was playing, and puts the song in the status.
-fn load_current(shared: &Shared) {
+fn load_current(shared: &Arc<Shared>) {
     let (song, index, length) = {
         let queue = lock(&shared.queue);
         (
@@ -1361,8 +1405,14 @@ fn load_current(shared: &Shared) {
     let Some(song) = song else {
         return;
     };
-    let before = lock(&shared.playing).replace(song.provider.clone());
-    if let Some(before) = before.filter(|before| *before != song.provider)
+    // a Spotify song without Premium plays its match from YouTube's engine
+    let stand_in = song.provider == SPOTIFY && shared.spotify.free();
+    let engine = match stand_in {
+        true => YOUTUBE.to_owned(),
+        false => song.provider.clone(),
+    };
+    let before = lock(&shared.playing).replace(engine.clone());
+    if let Some(before) = before.filter(|before| *before != engine)
         && let Some(player) = lock(&shared.slots)
             .get(&before)
             .and_then(|slot| slot.player.clone())
@@ -1381,9 +1431,42 @@ fn load_current(shared: &Shared) {
     tell(shared);
 
     let player = lock(&shared.slots)
-        .get(&song.provider)
+        .get(&engine)
         .and_then(|slot| slot.player.clone());
     match player {
+        Some(player) if stand_in => {
+            let shared = shared.clone();
+            shared.handle.clone().spawn(async move {
+                let found = matched(&shared, &song).await;
+                // the queue may have moved on while the match was looked for
+                let current = lock(&shared.status).song.as_ref().map(|it| it.id.clone());
+                if current.as_deref() != Some(song.id.as_str()) {
+                    return;
+                }
+                match found {
+                    Some(id) => {
+                        log::info!("mobile: playing spotify's {} as youtube's {id}", song.id);
+                        if let Err(error) = player.load(&id, Duration::ZERO, false) {
+                            log::warn!("mobile: cannot load {id}: {error:#}");
+                        }
+                    }
+                    None => {
+                        log::warn!(
+                            "mobile: youtube has no match for {} by {}",
+                            song.title,
+                            song.artist
+                        );
+                        match advance(&shared) {
+                            true => load_current(&shared),
+                            false => {
+                                lock(&shared.status).state = PlayState::Idle;
+                                tell(&shared);
+                            }
+                        }
+                    }
+                }
+            });
+        }
         Some(player) => {
             log::info!("mobile: loading {} from {}", song.id, song.provider);
             if let Err(error) = player.load(&song.id, Duration::ZERO, false) {
@@ -1661,6 +1744,52 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 }
 
 /// How many of the latest log lines the diagnostics keep.
+/// The YouTube Music song that is `song`, looked for by its title and artist: the result whose
+/// title and artist agree most, among those about as long, or none when nothing agrees.
+async fn matched(shared: &Shared, song: &Song) -> Option<String> {
+    let api = api_of(shared, YOUTUBE)?;
+    let query = format!("{} {}", song.title, song.artist);
+    let tracks = api
+        .search(&query)
+        .await
+        .inspect_err(|error| log::warn!("mobile: youtube cannot search for a match: {error:#}"))
+        .ok()?;
+    let title = words(&song.title);
+    let artist = words(&song.artist);
+    songs(tracks, YOUTUBE)
+        .into_iter()
+        .filter_map(|candidate| {
+            let close = song.duration_ms == 0
+                || candidate.duration_ms == 0
+                || candidate.duration_ms.abs_diff(song.duration_ms) <= MATCH_LENGTH;
+            let named = overlap(&title, &words(&candidate.title));
+            let by = overlap(
+                &artist,
+                &words(&format!("{} {}", candidate.artist, candidate.title)),
+            );
+            (close && named > 0.5).then_some((named + by, candidate.id))
+        })
+        .max_by(|a, b| a.0.total_cmp(&b.0))
+        .map(|(_, id)| id)
+}
+
+/// The lowercase words of `text`, with punctuation dropped.
+fn words(text: &str) -> Vec<String> {
+    text.split(|c: char| !c.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .map(str::to_lowercase)
+        .collect()
+}
+
+/// How many of `wanted`'s words `found` holds, from none at zero to all at one.
+fn overlap(wanted: &[String], found: &[String]) -> f64 {
+    if wanted.is_empty() {
+        return 0.;
+    }
+    let held = wanted.iter().filter(|word| found.contains(word)).count();
+    held as f64 / wanted.len() as f64
+}
+
 /// A duration in whole milliseconds.
 fn millis(at: Duration) -> u64 {
     at.as_millis() as u64
