@@ -381,7 +381,9 @@ impl Digida {
             .runtime
             .block_on(provider.sign_in(sign_in(method), prompt, input));
         *lock(&self.answers) = None;
-        self.keep(&slug, signed?);
+        let session = signed
+            .inspect_err(|error| log::warn!("mobile: cannot sign in to {slug}: {error:#}"))?;
+        self.keep(&slug, session);
         Ok(())
     }
 
@@ -452,12 +454,15 @@ impl Digida {
     /// The albums of the shown library: everything a catalog holds, or what was saved.
     pub fn albums(&self) -> Result<Vec<Release>, MobileError> {
         let (api, shape, _) = self.library()?;
-        let albums = self.runtime.block_on(async {
-            match shape.is_catalog() {
-                true => api.all_albums().await,
-                false => api.saved_albums().await,
-            }
-        })?;
+        let albums = self
+            .runtime
+            .block_on(async {
+                match shape.is_catalog() {
+                    true => api.all_albums().await,
+                    false => api.saved_albums().await,
+                }
+            })
+            .inspect_err(|error| log::warn!("mobile: cannot list albums: {error:#}"))?;
         Ok(albums.into_iter().map(release).collect())
     }
 
@@ -497,7 +502,10 @@ impl Digida {
     /// The tracks the shown provider finds for `query`.
     pub fn search(&self, query: String) -> Result<Vec<Song>, MobileError> {
         let (api, _, slug) = self.library()?;
-        let tracks = self.runtime.block_on(api.search(&query))?;
+        let tracks = self
+            .runtime
+            .block_on(api.search(&query))
+            .inspect_err(|error| log::warn!("mobile: {slug} cannot search: {error:#}"))?;
         Ok(songs(tracks, &slug))
     }
 
@@ -620,6 +628,16 @@ fn listen(
                 event,
                 PlaybackEvent::Ended { .. } | PlaybackEvent::Unavailable { .. }
             );
+            let refusal = match &event {
+                PlaybackEvent::Unavailable { .. } => Some("cannot play the track"),
+                PlaybackEvent::Throttled { .. } => Some("was turned down for now"),
+                PlaybackEvent::Refused => Some("was refused"),
+                PlaybackEvent::Gated => Some("needs something before it plays"),
+                _ => None,
+            };
+            if let Some(refusal) = refusal {
+                log::warn!("mobile: the {slug} engine {refusal} ({:?})", event.id());
+            }
             let changed = fold(&mut lock(&shared.status), &event);
             if changed {
                 tell(&shared);
@@ -694,6 +712,7 @@ fn load_current(shared: &Shared) {
         .and_then(|slot| slot.player.clone());
     match player {
         Some(player) => {
+            log::info!("mobile: loading {} from {}", song.id, song.provider);
             if let Err(error) = player.load(&song.id, Duration::ZERO, false) {
                 log::warn!("mobile: cannot load {}: {error:#}", song.id);
             }
@@ -915,12 +934,63 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-/// Sends the log to logcat on Android, and nowhere elsewhere.
-fn logging() {
+/// How many of the latest log lines the diagnostics keep.
+const LOG_LINES: usize = 400;
+
+/// The latest log lines, for the diagnostics screen to show and copy.
+static RECENT: Mutex<std::collections::VecDeque<String>> =
+    Mutex::new(std::collections::VecDeque::new());
+
+/// Keeps the latest log lines for the diagnostics and, on Android, hands every line to logcat
+/// as well.
+struct Recorder {
     #[cfg(target_os = "android")]
-    android_logger::init_once(
-        android_logger::Config::default()
-            .with_max_level(log::LevelFilter::Info)
-            .with_tag("digida"),
-    );
+    logcat: android_logger::AndroidLogger,
+}
+
+impl log::Log for Recorder {
+    fn enabled(&self, metadata: &log::Metadata) -> bool {
+        metadata.level() <= log::Level::Info
+    }
+
+    fn log(&self, record: &log::Record) {
+        if !self.enabled(record.metadata()) {
+            return;
+        }
+        #[cfg(target_os = "android")]
+        self.logcat.log(record);
+        let mut recent = lock(&RECENT);
+        if recent.len() == LOG_LINES {
+            recent.pop_front();
+        }
+        recent.push_back(format!(
+            "{} {}: {}",
+            record.level(),
+            record.target(),
+            record.args()
+        ));
+    }
+
+    fn flush(&self) {}
+}
+
+/// Starts keeping the log, once per process.
+fn logging() {
+    let recorder = Recorder {
+        #[cfg(target_os = "android")]
+        logcat: android_logger::AndroidLogger::new(
+            android_logger::Config::default()
+                .with_max_level(log::LevelFilter::Info)
+                .with_tag("digida"),
+        ),
+    };
+    if log::set_logger(Box::leak(Box::new(recorder))).is_ok() {
+        log::set_max_level(log::LevelFilter::Info);
+    }
+}
+
+/// The latest lines of the core's log, oldest first, for the diagnostics screen.
+#[uniffi::export]
+pub fn recent_log() -> Vec<String> {
+    lock(&RECENT).iter().cloned().collect()
 }

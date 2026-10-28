@@ -29,6 +29,7 @@ import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
@@ -167,11 +168,14 @@ fun SearchScreen(library: Library, onBack: (() -> Unit)?, songRow: @Composable (
     var query by remember { mutableStateOf("") }
     var results by remember { mutableStateOf<List<Song>>(emptyList()) }
     var busy by remember { mutableStateOf(false) }
+    var failed by remember { mutableStateOf<String?>(null) }
     val run = {
         if (query.isNotBlank()) {
             busy = true
             scope.launch {
-                results = runCatching { library.search(query.trim()) }.getOrDefault(emptyList())
+                val found = runCatching { library.search(query.trim()) }
+                results = found.getOrDefault(emptyList())
+                failed = found.exceptionOrNull()?.message
                 busy = false
             }
         }
@@ -186,6 +190,7 @@ fun SearchScreen(library: Library, onBack: (() -> Unit)?, songRow: @Composable (
             Field(query, { query = it }, stringResource(R.string.search_hint), Modifier.weight(1f), onDone = { run() })
         }
         if (busy) Label(stringResource(R.string.searching), Modifier.padding(18.dp), subtle = true)
+        failed?.let { Label(it, Modifier.padding(18.dp), subtle = true, lines = 6) }
         LazyColumn {
             items(results.size) { index -> songRow(results, index) }
         }
@@ -266,6 +271,46 @@ private fun CredentialsForm(onSubmit: (String, String, String) -> Unit) {
         Field(password, { password = it }, stringResource(R.string.password), Modifier.fillMaxWidth(), secret = true)
         SmallButton(stringResource(R.string.sign_in), accent = true) {
             if (server.isNotBlank() && user.isNotBlank()) onSubmit(server.trim(), user.trim(), password)
+        }
+    }
+}
+
+/** The core's latest log lines, to read on the phone or copy into a bug report. */
+@Composable
+fun Diagnostics() {
+    val palette = LocalPalette.current
+    val context = LocalContext.current
+    var lines by remember { mutableStateOf<List<String>?>(null) }
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            SmallButton(stringResource(if (lines == null) R.string.show_log else R.string.refresh_log)) {
+                lines = uniffi.digida_mobile.recentLog()
+            }
+            SmallButton(stringResource(R.string.copy_log), accent = true) {
+                val log = uniffi.digida_mobile.recentLog().joinToString("\n")
+                val clipboard = context.getSystemService(android.content.ClipboardManager::class.java)
+                clipboard.setPrimaryClip(android.content.ClipData.newPlainText("DIGIDA log", log))
+                lines = uniffi.digida_mobile.recentLog()
+            }
+        }
+        lines?.let { shown ->
+            Column(
+                Modifier.fillMaxWidth().height(320.dp)
+                    .surface(palette, Depth.Low, pressed = palette.finish != Finish.Glass, fill = palette.muted)
+                    .verticalScroll(rememberScrollState(Int.MAX_VALUE))
+                    .padding(12.dp)
+            ) {
+                shown.takeLast(200).forEach { line ->
+                    Text(
+                        line,
+                        style = TextStyle(
+                            color = if (line.startsWith("WARN") || line.startsWith("ERROR")) Color(0xFFE5484D) else palette.subtle,
+                            fontSize = 11.sp,
+                            fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                        ),
+                    )
+                }
+            }
         }
     }
 }

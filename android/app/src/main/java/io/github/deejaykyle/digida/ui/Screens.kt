@@ -702,6 +702,8 @@ private fun SettingsScreen(library: Library, preferences: Preferences, onBack: (
                     }
                 }
             }
+            item { Heading(stringResource(R.string.diagnostics), stringResource(R.string.diagnostics_detail)) }
+            item { Diagnostics() }
             item {
                 Spacer(Modifier.height(18.dp))
                 Label(stringResource(R.string.about), size = 12.sp, subtle = true, lines = 3)
