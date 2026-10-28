@@ -251,6 +251,7 @@ class Library(private val context: Context, private val preferences: Preferences
 
     /** Plays a station of songs like `song`, reporting a provider that has none. */
     fun startRadio(song: Song) {
+        if (!playable(song)) return
         scope.launch {
             runCatching { core.startRadio(song) }.onFailure { _problem.value = it.message }
         }
@@ -316,12 +317,31 @@ class Library(private val context: Context, private val preferences: Preferences
         core.setEqualizerEnabled(sound.enabled)
     }
 
-    fun playNext(song: Song) = core.playNext(song)
-    fun addToQueue(song: Song) = core.addToQueue(song)
+    fun playNext(song: Song) {
+        if (playable(song)) core.playNext(song)
+    }
+
+    fun addToQueue(song: Song) {
+        if (playable(song)) core.addToQueue(song)
+    }
+
+    /** Whether `song` can play on Android, saying why along the bottom when it cannot. */
+    private fun playable(song: Song): Boolean {
+        if (song.provider != APPLE) return true
+        _problem.value = context.getString(R.string.apple_playback_soon)
+        return false
+    }
     fun removeFromQueue(index: Int) = core.removeFromQueue(index.toUInt())
     fun jump(index: Int) = core.jump(index.toUInt())
 
-    fun play(songs: List<Song>, start: Int) = core.play(songs, start.toUInt())
+    /**
+     * Plays `songs` from `start`. Apple Music's songs are encrypted for a decoder the Android
+     * build does not drive yet, so they are browsable but say so instead of playing.
+     */
+    fun play(songs: List<Song>, start: Int) {
+        if (!playable(songs.getOrNull(start) ?: return)) return
+        core.play(songs.filter { it.provider != APPLE }, songs.take(start).count { it.provider != APPLE }.toUInt())
+    }
     fun toggle() = core.toggle()
     fun next() = core.next()
     fun previous() = core.previous()
@@ -334,6 +354,7 @@ class Library(private val context: Context, private val preferences: Preferences
 
     companion object {
         const val LOCAL = "local"
+        private const val APPLE = "apple"
     }
 }
 
