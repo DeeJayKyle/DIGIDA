@@ -4,6 +4,7 @@
 //! app makes them off its main thread; what playback and sign-in do arrives at the
 //! [`Listener`].
 
+mod downloads;
 mod links;
 mod scrobbling;
 
@@ -31,6 +32,8 @@ const RESTART: Duration = Duration::from_secs(3);
 /// The slug of the provider that plays files on the phone.
 const LOCAL: &str = "local";
 const SPOTIFY: &str = "spotify";
+/// How much the cache of played songs may hold, in bytes. Downloads do not count against it.
+const CACHE_LIMIT: u64 = 2 << 30;
 /// The name a scrobbling service's approval page is asked for under.
 const SCROBBLING: &str = "scrobbling";
 const YOUTUBE: &str = "youtube";
@@ -70,7 +73,7 @@ impl From<anyhow::Error> for MobileError {
 
 /// One track as the app lists it, with the provider that plays it. `cover` is a file path or
 /// a URL.
-#[derive(Clone, Debug, uniffi::Record)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, uniffi::Record)]
 pub struct Song {
     pub id: String,
     pub provider: String,
@@ -329,6 +332,8 @@ struct Shared {
     handle: tokio::runtime::Handle,
     /// The linked scrobbling accounts and the listen playing now.
     scrobbles: Mutex<scrobbling::Scrobbles>,
+    /// What is downloaded, and what waits to be.
+    downloads: Mutex<downloads::Downloads>,
 }
 
 /// A station of songs like a seed: its provider, the seed, and where its next stretch begins,
@@ -393,6 +398,12 @@ impl Digida {
 
         // Providers read their settings from the environment as on the desktop, so they are
         // built on the runtime that some of them start tasks on.
+        // played songs are cached and downloads kept in the encrypted vault, as on the desktop;
+        // players that keep their own files, like librespot, are told before they sign in
+        music::vault::Vault::set_keeping(true, CACHE_LIMIT);
+        let vault = Arc::new(music::vault::Vault::standard(CACHE_LIMIT));
+        unlock(&vault, &data);
+
         // an account without Premium is kept for its library, and its songs play from YouTube
         let spotify = Arc::new(music::spotify::SpotifyProvider::from_env().keeping_free());
         let providers: Vec<Arc<dyn MusicProvider>> = runtime.block_on(async {
@@ -439,7 +450,7 @@ impl Digida {
             quality: Quality::default(),
             meter: Meter::default(),
             analyzer: Analyzer::default(),
-            vault: None,
+            vault: Some(vault),
         };
 
         let handle = runtime.handle().clone();
@@ -457,6 +468,7 @@ impl Digida {
                 spotify,
                 handle,
                 scrobbles: Mutex::new(scrobbling::Scrobbles::load(data.join("scrobbling.json"))),
+                downloads: Mutex::new(downloads::Downloads::load(data.join("downloads.json"))),
             }),
             active: Mutex::new(LOCAL.to_owned()),
             answers: Mutex::new(None),
@@ -1431,11 +1443,14 @@ fn load_current(shared: &Arc<Shared>) {
     let Some(song) = song else {
         return;
     };
+    // a downloaded song plays from where it was kept, under the id it was kept by
+    let offline = lock(&shared.downloads).offline(&song);
     // a Spotify song without Premium plays its match from YouTube's engine
-    let stand_in = song.provider == SPOTIFY && shared.spotify.free();
-    let engine = match stand_in {
-        true => YOUTUBE.to_owned(),
-        false => song.provider.clone(),
+    let stand_in = offline.is_none() && song.provider == SPOTIFY && shared.spotify.free();
+    let engine = match (&offline, stand_in) {
+        (Some((engine, _)), _) => engine.clone(),
+        (None, true) => YOUTUBE.to_owned(),
+        (None, false) => song.provider.clone(),
     };
     let before = lock(&shared.playing).replace(engine.clone());
     if let Some(before) = before.filter(|before| *before != engine)
@@ -1495,8 +1510,9 @@ fn load_current(shared: &Arc<Shared>) {
             });
         }
         Some(player) => {
-            log::info!("mobile: loading {} from {}", song.id, song.provider);
-            if let Err(error) = player.load(&song.id, Duration::ZERO, false) {
+            let id = offline.map_or_else(|| song.id.clone(), |(_, id)| id);
+            log::info!("mobile: loading {id} from {engine}");
+            if let Err(error) = player.load(&id, Duration::ZERO, false) {
                 log::warn!("mobile: cannot load {}: {error:#}", song.id);
             }
         }
@@ -1815,6 +1831,31 @@ fn overlap(wanted: &[String], found: &[String]) -> f64 {
     }
     let held = wanted.iter().filter(|word| found.contains(word)).count();
     held as f64 / wanted.len() as f64
+}
+
+/// Unlocks `vault` with the key kept in `data`, making one on the first run. A key gone missing
+/// while downloads are sealed under it leaves the vault locked rather than replacing it, so the
+/// downloads come back if the key does.
+fn unlock(vault: &music::vault::Vault, data: &std::path::Path) {
+    let path = data.join("vault.key");
+    let master = match std::fs::read(&path) {
+        Ok(master) if master.len() == music::vault::MASTER => Ok(master),
+        Ok(_) => Err(anyhow::anyhow!("the vault key has the wrong length")),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && !vault.holds_downloads() => {
+            music::vault::Vault::new_master().and_then(|master| {
+                std::fs::write(&path, master)?;
+                Ok(master.to_vec())
+            })
+        }
+        Err(error) => Err(anyhow::Error::from(error).context("cannot read the vault key")),
+    };
+    match master {
+        Ok(master) => vault.unlock(&master),
+        Err(error) => {
+            log::warn!("mobile: the vault stays locked, so nothing plays from disk: {error:#}");
+            vault.stay_locked();
+        }
+    }
 }
 
 /// A duration in whole milliseconds.

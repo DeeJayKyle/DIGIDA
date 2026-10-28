@@ -96,6 +96,8 @@ private fun AccessScreen(onAnswer: (Boolean) -> Unit) {
             add(Manifest.permission.READ_MEDIA_IMAGES)
             add(Manifest.permission.POST_NOTIFICATIONS)
         }
+        // saved files land in Music, which Android 10 and older only let an app write to with this
+        if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.Q) add(Manifest.permission.WRITE_EXTERNAL_STORAGE)
     }
     val ask = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { answers ->
         onAnswer(answers[musicPermission()] == true)

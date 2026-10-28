@@ -16,6 +16,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import uniffi.digida_mobile.ArtistPage
+import uniffi.digida_mobile.Download
+import uniffi.digida_mobile.DownloadState
 import uniffi.digida_mobile.Digida
 import uniffi.digida_mobile.Feed
 import uniffi.digida_mobile.Headphone
@@ -313,6 +315,64 @@ class Library(private val context: Context, private val preferences: Preferences
     /** What a shared link points at, from the service it belongs to. */
     suspend fun openLink(link: String): Result<Opened> = withContext(Dispatchers.IO) { runCatching { core.openLink(link) } }
 
+    private val _downloads = MutableStateFlow(core.downloads())
+    /** The downloads list: arriving and waiting first, then failed, then kept. */
+    val downloads: StateFlow<List<Download>> = _downloads.asStateFlow()
+
+    /** The follower that refreshes the downloads list while anything is arriving. */
+    private var following: kotlinx.coroutines.Job? = null
+
+    /** Keeps `songs` in the vault to play with no network. */
+    fun download(songs: List<Song>) {
+        core.download(songs)
+        follow()
+    }
+
+    /**
+     * Saves the files of `songs` from the Subsonic server into Music/DIGIDA, where the phone's
+     * own music library, DIGIDA's included, finds them.
+     */
+    fun saveFiles(songs: List<Song>) {
+        val folder = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MUSIC).resolve(SAVED_FOLDER)
+        core.saveFiles(songs, folder.path)
+        follow()
+    }
+
+    fun removeDownload(song: Song) {
+        core.removeDownload(song)
+        _downloads.value = core.downloads()
+    }
+
+    fun clearFailedDownloads() {
+        core.clearFailedDownloads()
+        _downloads.value = core.downloads()
+    }
+
+    /** Whether `song`'s own file can be saved, which only the listener's own server allows. */
+    fun savesFiles(song: Song): Boolean = song.provider == SUBSONIC
+
+    /**
+     * Refreshes the downloads list every second until nothing arrives, then tells the phone
+     * about any file saved and scans the library again so the files show up there too.
+     */
+    private fun follow() {
+        if (following?.isActive == true) return
+        following = scope.launch {
+            val before = core.downloads().mapNotNull { it.file }.toSet()
+            while (true) {
+                val now = core.downloads()
+                _downloads.value = now
+                if (now.none { it.state is DownloadState.Queued || it.state is DownloadState.Running }) break
+                kotlinx.coroutines.delay(1_000)
+            }
+            val saved = _downloads.value.mapNotNull { it.file }.filter { it !in before }
+            if (saved.isNotEmpty()) {
+                android.media.MediaScannerConnection.scanFile(context, saved.toTypedArray(), null, null)
+                rescan()
+            }
+        }
+    }
+
     /** Turns the equalizer on or off. */
     fun setEqualizer(on: Boolean) = changeSound(_sound.value.copy(enabled = on))
 
@@ -397,6 +457,9 @@ class Library(private val context: Context, private val preferences: Preferences
     companion object {
         const val LOCAL = "local"
         private const val APPLE = "apple"
+        private const val SUBSONIC = "subsonic"
+        /** The folder under Music that saved files go to. */
+        private const val SAVED_FOLDER = "DIGIDA"
     }
 }
 

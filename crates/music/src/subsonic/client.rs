@@ -433,6 +433,21 @@ impl MusicApi for SubsonicClient {
         Ok(self.song(song))
     }
 
+    async fn original_file(&self, track_id: &str) -> Result<Option<(Vec<u8>, String)>> {
+        let song = self
+            .client
+            .get_song(track_id)
+            .await
+            .with_context(|| format!("cannot load the song {track_id}"))?;
+        let bytes = self
+            .client
+            .download(track_id)
+            .await
+            .with_context(|| format!("cannot download the song {track_id}"))?;
+        let extension = song.suffix.unwrap_or_else(|| "mp3".to_owned());
+        Ok(Some((bytes.to_vec(), extension)))
+    }
+
     async fn track_playcount(&self, track_id: &str) -> Result<Option<u64>> {
         let song = self.client.get_song(track_id).await.ok();
         Ok(song

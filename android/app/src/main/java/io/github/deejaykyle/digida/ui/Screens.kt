@@ -53,6 +53,8 @@ import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.Shuffle
+import androidx.compose.material.icons.rounded.DownloadForOffline
+import androidx.compose.material.icons.rounded.SaveAlt
 import androidx.compose.material.icons.rounded.SkipNext
 import androidx.compose.material.icons.rounded.SkipPrevious
 import androidx.compose.runtime.Composable
@@ -96,6 +98,7 @@ sealed interface Route {
     data object Settings : Route
     data class SettingsSection(val page: SettingsPage) : Route
     data object Equalizer : Route
+    data object Downloads : Route
 }
 
 /** The page each tab opens on. */
@@ -210,6 +213,7 @@ fun App(library: Library, preferences: Preferences) {
                                 stack.add(Route.Search)
                             },
                             onSettings = { stack.add(Route.Settings) },
+                            onDownloads = { stack.add(Route.Downloads) },
                         )
                         is Route.Album -> AlbumScreen(library, route.release, onBack = back)
                         is Route.Playlist -> PlaylistScreen(library, route.playlist, onBack = back)
@@ -224,6 +228,7 @@ fun App(library: Library, preferences: Preferences) {
                             onBack = back,
                             onOpen = { stack.add(Route.SettingsSection(it)) },
                             onEqualizer = { stack.add(Route.Equalizer) },
+                            onDownloads = { stack.add(Route.Downloads) },
                         )
                         is Route.SettingsSection -> SettingsScreen(
                             library,
@@ -232,8 +237,10 @@ fun App(library: Library, preferences: Preferences) {
                             onBack = back,
                             onOpen = { stack.add(Route.SettingsSection(it)) },
                             onEqualizer = { stack.add(Route.Equalizer) },
+                            onDownloads = { stack.add(Route.Downloads) },
                         )
                         Route.Equalizer -> EqualizerScreen(library, onBack = back)
+                        Route.Downloads -> DownloadsScreen(library, onBack = back)
                     }
                 }
                 AnimatedVisibility(
@@ -290,6 +297,7 @@ private fun HomeScreen(
     onPlaylist: (uniffi.digida_mobile.Playlist) -> Unit,
     onSearch: () -> Unit,
     onSettings: () -> Unit,
+    onDownloads: () -> Unit,
 ) {
     val palette = LocalPalette.current
     val shelf by library.shelf.collectAsStateWithLifecycle()
@@ -302,6 +310,8 @@ private fun HomeScreen(
                 IconPill(Icons.Rounded.Search, stringResource(R.string.search), onSearch, size = 40.dp)
                 Spacer(Modifier.width(10.dp))
             }
+            IconPill(Icons.Rounded.DownloadForOffline, stringResource(R.string.downloads), onDownloads, size = 40.dp)
+            Spacer(Modifier.width(10.dp))
             IconPill(Icons.Rounded.Settings, stringResource(R.string.settings), onSettings, size = 40.dp)
         }
         ServiceChips(library, Modifier.padding(bottom = 12.dp))
@@ -522,6 +532,7 @@ private fun AlbumScreen(library: Library, release: Release, onBack: () -> Unit) 
                 Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
                     IconPill(Icons.Rounded.PlayArrow, stringResource(R.string.play), { library.play(songs, 0) }, size = 56.dp, accent = true)
                     IconPill(Icons.Rounded.Shuffle, stringResource(R.string.shuffle), { library.play(songs.shuffled(), 0) }, size = 56.dp)
+                    DownloadAll(songs, library)
                 }
                 Spacer(Modifier.height(12.dp))
             }
@@ -552,6 +563,7 @@ private fun PlaylistScreen(library: Library, playlist: uniffi.digida_mobile.Play
                 Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
                     IconPill(Icons.Rounded.PlayArrow, stringResource(R.string.play), { library.play(songs, 0) }, size = 56.dp, accent = true)
                     IconPill(Icons.Rounded.Shuffle, stringResource(R.string.shuffle), { library.play(songs.shuffled(), 0) }, size = 56.dp)
+                    DownloadAll(songs, library)
                 }
                 Spacer(Modifier.height(12.dp))
             }
@@ -763,6 +775,7 @@ private fun SettingsScreen(
     onBack: () -> Unit,
     onOpen: (SettingsPage) -> Unit,
     onEqualizer: () -> Unit,
+    onDownloads: () -> Unit,
 ) {
     val palette = LocalPalette.current
     val finish by preferences.finish.collectAsStateWithLifecycle()
@@ -833,6 +846,18 @@ private fun SettingsScreen(
             item { Scrobbling(library) }
             }
             if (page == SettingsPage.Storage) {
+            item {
+                Pressable(
+                    onClick = onDownloads,
+                    modifier = Modifier.fillMaxWidth().padding(top = 10.dp),
+                    contentAlignment = Alignment.CenterStart,
+                ) {
+                    Column(Modifier.padding(14.dp)) {
+                        Label(stringResource(R.string.downloads), weight = FontWeight.SemiBold)
+                        Label(stringResource(R.string.downloads_detail), size = 13.sp, subtle = true, lines = 2)
+                    }
+                }
+            }
             item { Heading(stringResource(R.string.folders), stringResource(R.string.folders_detail)) }
             itemsIndexed(folders) { _, folder ->
                 Row(
@@ -911,6 +936,20 @@ private fun SettingsScreen(
             }
             item { Spacer(Modifier.height(120.dp)) }
         }
+    }
+}
+
+/**
+ * Downloads every song of an album or playlist: kept offline from a streaming service, or saved
+ * as files from the listener's own server.
+ */
+@Composable
+private fun DownloadAll(songs: List<Song>, library: Library) {
+    val first = songs.firstOrNull() ?: return
+    if (first.provider == Library.LOCAL) return
+    when (library.savesFiles(first)) {
+        true -> IconPill(Icons.Rounded.SaveAlt, stringResource(R.string.save_all), { library.saveFiles(songs) }, size = 56.dp)
+        false -> IconPill(Icons.Rounded.DownloadForOffline, stringResource(R.string.download_all), { library.download(songs) }, size = 56.dp)
     }
 }
 

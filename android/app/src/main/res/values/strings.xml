@@ -160,4 +160,17 @@
     <string name="supported_links_detail">Share a link from Spotify, YouTube, YouTube Music, Deezer, Tidal or Apple Music to DIGIDA, or open one with it, to play it here</string>
     <string name="changelog">Changelog</string>
     <string name="open_with_digida">Play in DIGIDA</string>
+    <string name="downloads">Downloads</string>
+    <string name="downloads_detail">Songs kept to play with no network, and files saved from your own server</string>
+    <string name="downloads_empty">Nothing downloaded yet. Long-press a song, or use the download button on an album or playlist.</string>
+    <string name="download_offline">Download for offline</string>
+    <string name="download_all">Download all for offline</string>
+    <string name="save_file">Save file to phone</string>
+    <string name="save_all">Save all files to phone</string>
+    <string name="download_waiting">Waiting</string>
+    <string name="download_starting">Starting…</string>
+    <string name="download_progress">%1$d%%</string>
+    <string name="download_offline_ready">Plays offline in DIGIDA</string>
+    <string name="download_saved">Saved to Music/DIGIDA</string>
+    <string name="clear_failed">Clear failed</string>
 </resources>

@@ -19,11 +19,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - DIGIDA works with Android Auto: browse the queue and your songs from the car's screen.
 - Save your Android settings to a file and restore them on another phone, and clear the cover
   cache under Storage.
+- Download songs, albums and whole playlists on Android to play with no network. Downloads are
+  kept encrypted and play only in DIGIDA, as on the desktop.
+- Save the files of songs, albums and playlists from your own Navidrome or Subsonic server into
+  Music/DIGIDA on your phone, where any music app can play them.
 
 ### Fixed
 
 - Android sign-ins and the headphone search reach the internet again, and the lyrics and queue
   panels no longer show the player through them.
+- Spotify's library, playlists and home load on Android.
 
 ## [1.0.0] - 2026-10-26
 

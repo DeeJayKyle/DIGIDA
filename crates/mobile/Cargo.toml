@@ -17,6 +17,7 @@ music = { workspace = true, features = ["bundled-sqlite"] }
 storage = { workspace = true, features = ["bundled-sqlite"] }
 reqwest.workspace = true
 rustls.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 uniffi.workspace = true
