@@ -3,7 +3,7 @@ use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{Context as _, Result, anyhow};
+use anyhow::{Context as _, Result};
 
 use crate::spotify::offline;
 use crate::vault::Vault;
@@ -182,20 +182,28 @@ fn authorize(client_id: &str, redirect_uri: &str, prompt: PromptSink) -> Result<
         .exchange_code(AuthorizationCode::new(code.to_string()))
         .set_pkce_verifier(verifier)
         .request(&exchange)
-        .map_err(|error| anyhow!("failed to exchange Spotify authorization code: {error}"))?;
+        .map_err(|error| {
+            anyhow::Error::new(error).context("failed to exchange Spotify authorization code")
+        })?;
     Ok(response.access_token().secret().to_owned())
 }
 
 /// Carries one oauth2 request over reqwest. oauth2 only knows the reqwest it was built against,
-/// so the workspace one is handed in as a plain function instead.
+/// so the workspace one is handed in as a plain function instead. It goes through the async
+/// client on the runtime the login's blocking task belongs to, the client every other request
+/// uses, rather than the blocking one, whose own threads Android's certificate checks do not
+/// reach.
 fn exchange(request: oauth2::HttpRequest) -> Result<oauth2::HttpResponse, reqwest::Error> {
-    let sent = reqwest::blocking::Client::new().execute(request.try_into()?)?;
-    let status = sent.status();
-    let headers = sent.headers().clone();
-    let mut response = http::Response::new(sent.bytes()?.to_vec());
-    *response.status_mut() = status;
-    *response.headers_mut() = headers;
-    Ok(response)
+    let request: reqwest::Request = request.try_into()?;
+    tokio::runtime::Handle::current().block_on(async {
+        let sent = reqwest::Client::new().execute(request).await?;
+        let status = sent.status();
+        let headers = sent.headers().clone();
+        let mut response = http::Response::new(sent.bytes().await?.to_vec());
+        *response.status_mut() = status;
+        *response.headers_mut() = headers;
+        Ok(response)
+    })
 }
 
 async fn premium(session: &Session) -> Result<()> {

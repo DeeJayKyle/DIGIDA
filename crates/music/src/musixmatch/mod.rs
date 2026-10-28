@@ -340,7 +340,7 @@ fn seconds(value: f64) -> Duration {
 }
 
 fn path() -> PathBuf {
-    dirs::cache_dir()
+    storage::folders::cache_dir()
         .unwrap_or_else(std::env::temp_dir)
         .join("digida")
         .join("musixmatch.json")

@@ -22,6 +22,16 @@ The first release of DIGIDA, a fork of Sonora 0.44.2.
   of the page, rise when hovered and press in when chosen.
 - Skeuomorphic draws lit gradients, bevelled edges and a paper grain over the page.
 - Switching style fades the palette over and settles the window into the new material.
+- DIGIDA now runs on Android. It plays the music on your phone and streams from Spotify,
+  YouTube Music, Deezer, Tidal and Navidrome or any Subsonic server, in the same four styles.
+  Apple Music can be browsed on Android; playing it comes in a later update.
+- On Android, browse home feeds and artist pages, long-press a song for its menu, swipe one onto
+  the queue, start a radio that keeps going, set a sleep timer and follow synced lyrics.
+- The Android equalizer has presets, ten bands and corrections for thousands of headphones
+  measured by AutoEq.
+- Lyrics light up word by word where the source times them, with a Latin spelling under lines in
+  other scripts.
+- Add the DIGIDA widget to your home screen to see what is playing and skip or pause from there.
 
 ### Changed
 

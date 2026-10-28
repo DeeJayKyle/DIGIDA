@@ -1,0 +1,31 @@
+[package]
+name = "mobile"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The library the Android app links: the music core behind a small API that UniFFI turns into
+# Kotlin. It names no GPUI type, so it builds for any target the music crate does.
+[lib]
+name = "digida_mobile"
+crate-type = ["lib", "cdylib"]
+
+[dependencies]
+anyhow.workspace = true
+log.workspace = true
+music = { workspace = true, features = ["bundled-sqlite"] }
+storage = { workspace = true, features = ["bundled-sqlite"] }
+reqwest.workspace = true
+tokio.workspace = true
+uniffi.workspace = true
+
+[target.'cfg(target_os = "android")'.dependencies]
+android_logger.workspace = true
+# The JavaScript engine YouTube Music's player runs in ships no prebuilt bindings for Android,
+# so they are generated from its headers at build time.
+rquickjs-sys = { workspace = true, features = ["bindgen"] }
+# HTTPS checks certificates against the phone's own trust store, which needs the app's context.
+jni.workspace = true
+# The audio output reaches Android's audio services through the process's registered context.
+ndk-context.workspace = true
+rustls-platform-verifier.workspace = true

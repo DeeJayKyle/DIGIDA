@@ -86,6 +86,9 @@ zbus = { version = "5", default-features = false, features = ["async-io", "block
 libc = "0.2"
 lofty = "0.25"
 log = "0.4"
+jni = { version = "0.22", default-features = false }
+ndk-context = "0.1"
+android_logger = "0.15"
 md-5 = "0.10"
 moka = { version = "0.12.15", features = ["future", "sync"] }
 mpris-server = "0.10"
@@ -147,6 +150,8 @@ roxmltree = "0.21"
 rodio = { version = "0.22", default-features = false, features = ["playback"] }
 rtrb = "0.3"
 rusqlite = { version = "0.32" }
+rquickjs-sys = "0.12.2"
+rustls-platform-verifier = "0.7"
 # Pinned exactly: a young crate, and the decoder every HE-AAC stream goes through.
 rusty_aac = { version = "=1.1.1", default-features = false }
 rustfft = "6.4"
@@ -188,6 +193,7 @@ tokio = { version = "1.53", features = [
   "time",
 ] }
 time = { version = "0.3.55", features = ["parsing"] }
+uniffi = "0.32"
 
 [patch.crates-io]
 librespot-audio = { git = "https://github.com/sonorahq/librespot", rev = "84f551d4afc7823ef12b6b02d09e34e2ddaccf99" }

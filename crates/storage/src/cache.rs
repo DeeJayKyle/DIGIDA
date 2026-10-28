@@ -43,7 +43,7 @@ pub struct Cache {
 impl Cache {
     /// `$XDG_CACHE_HOME/sonora/cache.sqlite` and equivalent on Windows.
     pub fn standard() -> Self {
-        let dir = dirs::cache_dir()
+        let dir = crate::folders::cache_dir()
             .unwrap_or_else(std::env::temp_dir)
             .join("digida");
         Self::at(dir.join("cache.sqlite"))

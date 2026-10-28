@@ -714,7 +714,7 @@ fn announced(total: Option<u64>, ceiling: usize) -> Option<usize> {
 /// A file in Sonora's cache directory with no name, so nothing is left behind however the
 /// process ends.
 fn spool_file() -> io::Result<File> {
-    let folder = dirs::cache_dir()
+    let folder = storage::folders::cache_dir()
         .unwrap_or_else(std::env::temp_dir)
         .join("digida");
     std::fs::create_dir_all(&folder)?;

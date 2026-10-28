@@ -1,0 +1,1738 @@
+//! The music core for the Android app. It owns a tokio runtime, every provider the desktop app
+//! has, a session and a playback engine per provider once signed in, and the queue, since the
+//! desktop's queue lives in GPUI state. Library calls block until the provider answers, so the
+//! app makes them off its main thread; what playback and sign-in do arrives at the
+//! [`Listener`].
+
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use music::equalizer::{Curve, EqualizerWriter, Preamp};
+use music::local::LocalProvider;
+use music::{
+    Album, Analyzer, Meter, MusicApi, MusicProvider, PlaybackConfig, PlaybackEvent, Player,
+    Playlist as Listing, ProviderSession, Quality, Shape, SignIn, SignInPrompt, Track, Transcode,
+};
+use storage::{Cache, Database};
+use tokio::runtime::Runtime;
+use tokio::sync::mpsc::UnboundedSender;
+
+uniffi::setup_scaffolding!();
+
+/// How often an engine reports where it is in a track.
+const POSITION_INTERVAL: Duration = Duration::from_millis(250);
+/// How far into a track Previous restarts it rather than going back a track.
+const RESTART: Duration = Duration::from_secs(3);
+/// The slug of the provider that plays files on the phone.
+const LOCAL: &str = "local";
+/// How many bands the graphic equalizer has.
+const BANDS: usize = 10;
+/// Where AutoEq's results are read from.
+const AUTOEQ: &str = "https://raw.githubusercontent.com/jaakkopasanen/AutoEq/master/results";
+/// How long the AutoEq list is kept before it is fetched again.
+const AUTOEQ_KEEP: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+/// How many headphones a search lists at most.
+const HEADPHONE_RESULTS: usize = 100;
+/// The page proof-of-origin tokens are minted in, the desktop's own.
+const POTOKEN_PAGE: &str = "https://www.youtube.com/embed/jNQXAC9IVRw";
+
+/// Why a call into the core failed, as one line of English for a log or a toast.
+#[derive(Debug, uniffi::Error)]
+#[uniffi(flat_error)]
+pub enum MobileError {
+    Failed(String),
+}
+
+impl std::fmt::Display for MobileError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Failed(message) => f.write_str(message),
+        }
+    }
+}
+
+impl From<anyhow::Error> for MobileError {
+    fn from(error: anyhow::Error) -> Self {
+        Self::Failed(format!("{error:#}"))
+    }
+}
+
+/// One track as the app lists it, with the provider that plays it. `cover` is a file path or
+/// a URL.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct Song {
+    pub id: String,
+    pub provider: String,
+    pub title: String,
+    pub artist: String,
+    pub album: String,
+    pub album_id: Option<String>,
+    /// The lead artist's id, for a link to their page.
+    pub artist_id: Option<String>,
+    pub cover: Option<String>,
+    pub duration_ms: u64,
+}
+
+/// One album as the app lists it.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct Release {
+    pub id: String,
+    pub title: String,
+    pub artist: String,
+    pub cover: Option<String>,
+    pub year: i32,
+    pub track_count: u32,
+}
+
+/// One playlist as the app lists it.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct Playlist {
+    pub id: String,
+    pub title: String,
+    pub owner: String,
+    pub cover: Option<String>,
+    pub track_count: u32,
+}
+
+/// What a card on a home feed opens.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum TileKind {
+    Song,
+    Album,
+    Playlist,
+    Artist,
+    Genre,
+}
+
+/// One card on a home feed: what it opens, how it is named and drawn, and the song itself when
+/// it is one.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct Tile {
+    pub kind: TileKind,
+    pub id: String,
+    pub title: String,
+    pub subtitle: String,
+    pub cover: Option<String>,
+    pub song: Option<Song>,
+}
+
+/// One row of a home feed.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct Section {
+    pub title: String,
+    pub tiles: Vec<Tile>,
+}
+
+/// A provider's home: what was played lately, a mix of songs picked for the listener, and the
+/// rows the provider recommends.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct Feed {
+    pub listen_again: Vec<Tile>,
+    pub quick_picks: Vec<Song>,
+    pub sections: Vec<Section>,
+}
+
+/// An artist's page.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct ArtistPage {
+    pub name: String,
+    pub cover: Option<String>,
+    pub biography: Option<String>,
+    pub top: Vec<Song>,
+    pub albums: Vec<Release>,
+}
+
+/// One line of lyrics and when it starts, which is zero throughout for unsynced lyrics. `words`
+/// is empty unless the source timed each word, and `romanized` is the line in Latin letters when
+/// it is written in another script.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct Line {
+    pub start_ms: u64,
+    pub end_ms: Option<u64>,
+    pub text: String,
+    pub romanized: Option<String>,
+    pub words: Vec<Word>,
+}
+
+/// One word of a karaoke line, and when it is sung.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct Word {
+    pub start_ms: u64,
+    pub end_ms: u64,
+    pub text: String,
+}
+
+/// What the equalizer is set to: on or off, and the ten band gains in decibels it shows, lowest
+/// band first. A headphone profile plays its own filters, so its bands read flat.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct Sound {
+    pub enabled: bool,
+    pub gains: Vec<f64>,
+    pub preset: Option<String>,
+}
+
+/// One headphone AutoEq has a correction for, and who measured it.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct Headphone {
+    pub name: String,
+    pub source: String,
+    /// Where its results live under AutoEq's `results` folder, already percent-encoded.
+    pub path: String,
+}
+
+/// A song's lyrics and where they came from.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct Words {
+    pub synced: bool,
+    pub lines: Vec<Line>,
+    pub source: String,
+}
+
+/// The ways a provider can be signed in to, as the app offers them.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum Method {
+    /// The provider's own sign-in in a browser.
+    Browser,
+    /// Browsing without an account.
+    Guest,
+    /// Cookies from a signed-in browser session, pasted or caught by a web view.
+    Cookies,
+    /// A server address, user name and password, as a self-hosted server wants.
+    Credentials {
+        server: String,
+        username: String,
+        password: String,
+    },
+}
+
+/// A provider the app can sign in to, and how far along it is.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct Service {
+    pub slug: String,
+    pub name: String,
+    pub signed_in: bool,
+    /// Whether a sign-in is kept on the phone that [`Digida::restore`] can bring back.
+    pub stored: bool,
+    pub methods: Vec<Method>,
+    pub account: Option<String>,
+    /// Whether the session is an account's rather than a guest's, which has no library of its
+    /// own to list, only search.
+    pub authenticated: bool,
+}
+
+/// How to catch a provider's sign-in cookies in a web view: open `url`, and once the cookies
+/// for `domain` carry one of the `proof` names the user is through, and those cookies, as a
+/// `Cookie` header, are the answer to [`Prompt::Cookies`]. `agent` replaces the web view's own
+/// user agent where the provider wants one.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct WebLogin {
+    pub url: String,
+    pub landing: String,
+    pub domain: String,
+    pub proof: Vec<String>,
+    pub agent: Option<String>,
+}
+
+/// An account a sign-in asks the listener to pick.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct Account {
+    pub id: String,
+    pub name: String,
+    pub detail: Option<String>,
+}
+
+/// What a sign-in asks of the listener while it runs. The answer, where one is wanted, goes
+/// back through [`Digida::answer`].
+#[derive(Clone, Debug, uniffi::Enum)]
+pub enum Prompt {
+    /// Open this page in a browser; the sign-in finishes when it redirects back.
+    Url { url: String },
+    /// Enter `code` on the page at `url`.
+    Code { code: String, url: String },
+    /// Answer with the cookies of a signed-in session.
+    Cookies,
+    /// Answer with the id of one of these accounts.
+    Accounts { accounts: Vec<Account> },
+}
+
+/// What an engine is doing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum PlayState {
+    Idle,
+    Loading,
+    Playing,
+    Paused,
+}
+
+/// Everything the player screen draws from: the transport state, the track, where it stands
+/// and where it sits in the queue.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct Status {
+    pub state: PlayState,
+    pub song: Option<Song>,
+    pub position_ms: u64,
+    pub duration_ms: u64,
+    pub index: u32,
+    pub queue_length: u32,
+}
+
+/// Told about playback and sign-in on a core thread: the app hops to its own.
+#[uniffi::export(with_foreign)]
+pub trait Listener: Send + Sync {
+    fn changed(&self, status: Status);
+    fn prompt(&self, provider: String, prompt: Prompt);
+}
+
+/// The queue the core plays through, with the song now playing at `index`.
+#[derive(Default)]
+struct Queue {
+    songs: Vec<Song>,
+    index: usize,
+}
+
+/// One provider and, once signed in, its session and the engine it plays through.
+struct Slot {
+    provider: Arc<dyn MusicProvider>,
+    session: Option<ProviderSession>,
+    player: Option<Arc<dyn Player>>,
+}
+
+/// What the event loops and the transport share.
+struct Shared {
+    slots: Mutex<HashMap<String, Slot>>,
+    /// The provider whose engine plays the queue now.
+    playing: Mutex<Option<String>>,
+    queue: Mutex<Queue>,
+    status: Mutex<Status>,
+    listener: Mutex<Option<Arc<dyn Listener>>>,
+    /// The station the queue is following, so autoplay fetches its next stretch.
+    station: Mutex<Option<Station>>,
+    /// Whether the queue carries on with a station of similar songs once it runs out.
+    autoplay: std::sync::atomic::AtomicBool,
+    /// Whether playback stops when the song playing ends, for the sleep timer's end of song.
+    stop_at_end: std::sync::atomic::AtomicBool,
+}
+
+/// A station of songs like a seed: its provider, the seed, and where its next stretch begins,
+/// `None` once the provider has no more.
+#[derive(Clone)]
+struct Station {
+    provider: String,
+    seed: String,
+    from: Option<String>,
+}
+
+/// The core. One per app process.
+#[derive(uniffi::Object)]
+pub struct Digida {
+    runtime: Runtime,
+    shared: Arc<Shared>,
+    /// The provider the library screens show.
+    active: Mutex<String>,
+    /// Where an answer to a running sign-in's prompt goes.
+    answers: Mutex<Option<UnboundedSender<String>>>,
+    /// The running sleep timer, aborted when it is set again or cancelled.
+    sleep: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// The equalizer's one writer, which every engine reads the curve from.
+    equalizer: Mutex<EqualizerWriter>,
+    /// AutoEq's list of headphone profiles, read once a run.
+    headphones: Mutex<Option<Arc<Vec<Headphone>>>>,
+    /// Where the AutoEq list is kept between runs.
+    cache: PathBuf,
+    config: PlaybackConfig,
+}
+
+#[uniffi::export]
+impl Digida {
+    /// Opens the core over `data_dir`, where sign-ins and the library database live, and
+    /// `cache_dir`, where covers and the scan index go. Both are the app's private folders.
+    #[uniffi::constructor]
+    pub fn new(
+        data_dir: String,
+        cache_dir: String,
+        normalise: bool,
+    ) -> Result<Arc<Self>, MobileError> {
+        logging();
+        #[cfg(target_os = "android")]
+        trust(std::path::Path::new(&cache_dir));
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .thread_name("digida-core")
+            .build()
+            .map_err(anyhow::Error::from)?;
+        let data = PathBuf::from(data_dir);
+        let cache = PathBuf::from(cache_dir);
+        std::fs::create_dir_all(&data).map_err(anyhow::Error::from)?;
+        std::fs::create_dir_all(&cache).map_err(anyhow::Error::from)?;
+        // the music engine keeps sign-ins and downloads under these, since Android names no
+        // platform folders of its own
+        storage::folders::set(data.clone(), cache.clone());
+
+        // Providers read their settings from the environment as on the desktop, so they are
+        // built on the runtime that some of them start tasks on.
+        let providers: Vec<Arc<dyn MusicProvider>> = runtime.block_on(async {
+            vec![
+                Arc::new(LocalProvider::new(
+                    cache.join("local"),
+                    Database::at(data.join("state.sqlite")),
+                    Cache::at(cache.join("cache.sqlite")),
+                )) as Arc<dyn MusicProvider>,
+                Arc::new(music::spotify::SpotifyProvider::from_env()),
+                Arc::new(music::youtube::YouTubeProvider::new()),
+                Arc::new(music::apple::AppleProvider::new()),
+                Arc::new(music::deezer::DeezerProvider::new()),
+                Arc::new(music::tidal::TidalProvider::new()),
+                Arc::new(music::subsonic::SubsonicProvider::new()),
+            ]
+        });
+        let slots = providers
+            .into_iter()
+            .map(|provider| {
+                (
+                    provider.slug().to_owned(),
+                    Slot {
+                        provider,
+                        session: None,
+                        player: None,
+                    },
+                )
+            })
+            .collect();
+
+        let equalizer = EqualizerWriter::new(
+            false,
+            Curve::new(Preamp::Manual(0.), Vec::new())
+                .map_err(|_| MobileError::Failed("cannot build a flat equalizer".to_owned()))?,
+        );
+        let config = PlaybackConfig {
+            normalisation: normalise,
+            gapless: true,
+            position_interval: POSITION_INTERVAL,
+            gain: 1.,
+            equalizer: equalizer.reader(),
+            transcode: Transcode::default(),
+            quality: Quality::default(),
+            meter: Meter::default(),
+            analyzer: Analyzer::default(),
+            vault: None,
+        };
+
+        Ok(Arc::new(Self {
+            runtime,
+            shared: Arc::new(Shared {
+                slots: Mutex::new(slots),
+                playing: Mutex::new(None),
+                queue: Mutex::new(Queue::default()),
+                status: Mutex::new(idle()),
+                listener: Mutex::new(None),
+                station: Mutex::new(None),
+                autoplay: std::sync::atomic::AtomicBool::new(true),
+                stop_at_end: std::sync::atomic::AtomicBool::new(false),
+            }),
+            active: Mutex::new(LOCAL.to_owned()),
+            answers: Mutex::new(None),
+            sleep: Mutex::new(None),
+            equalizer: Mutex::new(equalizer),
+            headphones: Mutex::new(None),
+            cache,
+            config,
+        }))
+    }
+
+    /// Hands the core the one listener it tells about playback and sign-in, replacing any
+    /// before it.
+    pub fn set_listener(&self, listener: Arc<dyn Listener>) {
+        *lock(&self.shared.listener) = Some(listener.clone());
+        listener.changed(lock(&self.shared.status).clone());
+    }
+
+    /// Every provider, local files first, with how far along each is.
+    pub fn services(&self) -> Vec<Service> {
+        let slots = lock(&self.shared.slots);
+        let mut services: Vec<Service> = slots
+            .iter()
+            .map(|(slug, slot)| Service {
+                slug: slug.clone(),
+                name: slot.provider.name().to_owned(),
+                signed_in: slot.session.is_some(),
+                stored: slot.provider.stored(),
+                methods: slot
+                    .provider
+                    .sign_in_options()
+                    .into_iter()
+                    .filter_map(method)
+                    .collect(),
+                account: slot
+                    .session
+                    .as_ref()
+                    .map(|session| session.profile.display_name.clone()),
+                authenticated: slot
+                    .session
+                    .as_ref()
+                    .is_some_and(|session| session.authenticated),
+            })
+            .collect();
+        services.sort_by_key(|service| (service.slug != LOCAL, service.name.clone()));
+        services
+    }
+
+    /// Brings back every sign-in kept on the phone, answering the slugs that came back. One
+    /// provider failing leaves the others alone.
+    pub fn restore(&self) -> Vec<String> {
+        let providers: Vec<(String, Arc<dyn MusicProvider>)> = lock(&self.shared.slots)
+            .iter()
+            .filter(|(slug, slot)| *slug != LOCAL && slot.provider.stored())
+            .map(|(slug, slot)| (slug.clone(), slot.provider.clone()))
+            .collect();
+        let mut restored = Vec::new();
+        for (slug, provider) in providers {
+            match self.runtime.block_on(provider.restore()) {
+                Ok(Some(session)) => {
+                    self.keep(&slug, session);
+                    restored.push(slug);
+                }
+                Ok(None) => {}
+                Err(error) => log::warn!("mobile: cannot restore {slug}: {error:#}"),
+            }
+        }
+        restored
+    }
+
+    /// Signs in to `slug` by `method`, blocking until it is done. Prompts the sign-in raises go
+    /// to the listener, and its answers come back through [`Self::answer`].
+    pub fn sign_in(&self, slug: String, method: Method) -> Result<(), MobileError> {
+        let provider = self.provider(&slug)?;
+        let (answers, input) = tokio::sync::mpsc::unbounded_channel();
+        *lock(&self.answers) = Some(answers);
+        let shared = self.shared.clone();
+        let asker = slug.clone();
+        let prompt = Arc::new(move |prompt: SignInPrompt| {
+            let listener = lock(&shared.listener).clone();
+            if let Some(listener) = listener {
+                listener.prompt(asker.clone(), relay(prompt));
+            }
+        });
+        let signed = self
+            .runtime
+            .block_on(provider.sign_in(sign_in(method), prompt, input));
+        *lock(&self.answers) = None;
+        let session = signed
+            .inspect_err(|error| log::warn!("mobile: cannot sign in to {slug}: {error:#}"))?;
+        self.keep(&slug, session);
+        Ok(())
+    }
+
+    /// How `slug` signs in through a web view, for a provider that takes cookies.
+    pub fn web_login(&self, slug: String) -> Option<WebLogin> {
+        let web = self.provider(&slug).ok()?.web_sign_in()?;
+        Some(WebLogin {
+            url: web.url.to_owned(),
+            landing: web.landing.to_owned(),
+            domain: web.domain.to_owned(),
+            proof: web.proof.iter().map(|name| (*name).to_owned()).collect(),
+            agent: web.agent.map(str::to_owned),
+        })
+    }
+
+    /// Answers the prompt a running sign-in raised: the cookies it asked for, or the id of
+    /// the account picked.
+    pub fn answer(&self, text: String) {
+        if let Some(answers) = lock(&self.answers).as_ref() {
+            answers.send(text).ok();
+        }
+    }
+
+    /// Gives up on a running sign-in.
+    pub fn cancel_sign_in(&self, slug: String) {
+        *lock(&self.answers) = None;
+        if let Ok(provider) = self.provider(&slug) {
+            provider.abandon();
+        }
+    }
+
+    /// Signs out of `slug` and forgets its kept sign-in.
+    pub fn sign_out(&self, slug: String) {
+        let mut slots = lock(&self.shared.slots);
+        if let Some(slot) = slots.get_mut(&slug) {
+            if let Some(player) = slot.player.take() {
+                player.pause();
+            }
+            slot.session = None;
+            slot.provider.sign_out();
+        }
+    }
+
+    /// Scans `folders` into the local library, replacing what an earlier scan found.
+    pub fn scan(&self, folders: Vec<String>) -> Result<(), MobileError> {
+        let provider = self.provider(LOCAL)?;
+        let paths = folders.into_iter().map(PathBuf::from).collect();
+        let (_answers, input) = tokio::sync::mpsc::unbounded_channel();
+        let session = self.runtime.block_on(provider.sign_in(
+            SignIn::Path(paths),
+            Arc::new(|_| {}),
+            input,
+        ))?;
+        self.keep(LOCAL, session);
+        Ok(())
+    }
+
+    /// Shows `slug`'s library on the library screens.
+    pub fn set_active(&self, slug: String) {
+        *lock(&self.active) = slug;
+    }
+
+    /// The provider the library screens show.
+    pub fn active(&self) -> String {
+        lock(&self.active).clone()
+    }
+
+    /// The albums of the shown library: everything a catalog holds, or what was saved.
+    pub fn albums(&self) -> Result<Vec<Release>, MobileError> {
+        let (api, shape, _) = self.library()?;
+        let albums = self
+            .runtime
+            .block_on(async {
+                match shape.is_catalog() {
+                    true => api.all_albums().await,
+                    false => api.saved_albums().await,
+                }
+            })
+            .inspect_err(|error| log::warn!("mobile: cannot list albums: {error:#}"))?;
+        log::info!("mobile: {} albums in the library", albums.len());
+        Ok(albums.into_iter().map(release).collect())
+    }
+
+    /// The tracks of the shown library: everything a catalog holds, or what was saved.
+    pub fn songs(&self) -> Result<Vec<Song>, MobileError> {
+        let (api, shape, slug) = self.library()?;
+        let tracks = self
+            .runtime
+            .block_on(async {
+                match shape.is_catalog() {
+                    true => api.all_tracks().await,
+                    false => api.saved_tracks().await,
+                }
+            })
+            .inspect_err(|error| log::warn!("mobile: cannot list songs: {error:#}"))?;
+        log::info!("mobile: {} songs in the library", tracks.len());
+        Ok(songs(tracks, &slug))
+    }
+
+    /// The playlists of the shown library.
+    pub fn playlists(&self) -> Result<Vec<Playlist>, MobileError> {
+        let (api, _, _) = self.library()?;
+        let playlists = self
+            .runtime
+            .block_on(api.playlists())
+            .inspect_err(|error| log::warn!("mobile: cannot list playlists: {error:#}"))?;
+        log::info!("mobile: {} playlists in the library", playlists.len());
+        Ok(playlists.into_iter().map(list).collect())
+    }
+
+    /// The tracks of one album, in disc and track order.
+    pub fn album_songs(&self, album_id: String) -> Result<Vec<Song>, MobileError> {
+        let (api, _, slug) = self.library()?;
+        let tracks = self.runtime.block_on(api.album_tracks(&album_id))?;
+        Ok(songs(tracks, &slug))
+    }
+
+    /// The tracks of one playlist, in its order.
+    pub fn playlist_songs(&self, playlist_id: String) -> Result<Vec<Song>, MobileError> {
+        let (api, _, slug) = self.library()?;
+        let tracks = self.runtime.block_on(api.playlist_tracks(&playlist_id))?;
+        Ok(songs(tracks, &slug))
+    }
+
+    /// The tracks the shown provider finds for `query`.
+    pub fn search(&self, query: String) -> Result<Vec<Song>, MobileError> {
+        let (api, _, slug) = self.library()?;
+        let tracks = self
+            .runtime
+            .block_on(api.search(&query))
+            .inspect_err(|error| log::warn!("mobile: {slug} cannot search: {error:#}"))?;
+        Ok(songs(tracks, &slug))
+    }
+
+    /// The shown provider's home feed. Local files have none, and answer an empty one.
+    pub fn home(&self) -> Result<Feed, MobileError> {
+        let (api, _, slug) = self.library()?;
+        let feed = self
+            .runtime
+            .block_on(api.home())
+            .inspect_err(|error| log::warn!("mobile: {slug} has no home: {error:#}"))?;
+        Ok(Feed {
+            listen_again: feed
+                .listen_again
+                .into_iter()
+                .filter_map(|item| tile(item, &slug))
+                .collect(),
+            quick_picks: songs(feed.quick_picks.unwrap_or_default(), &slug),
+            sections: feed
+                .sections
+                .into_iter()
+                .map(|section| Section {
+                    title: section.title,
+                    tiles: section
+                        .items
+                        .into_iter()
+                        .filter_map(|item| tile(item, &slug))
+                        .collect(),
+                })
+                .filter(|section| !section.tiles.is_empty())
+                .collect(),
+        })
+    }
+
+    /// One artist's page from the shown provider.
+    pub fn artist(&self, artist_id: String) -> Result<ArtistPage, MobileError> {
+        let (api, _, slug) = self.library()?;
+        let artist = self
+            .runtime
+            .block_on(api.artist(&artist_id))
+            .inspect_err(|error| log::warn!("mobile: cannot open artist {artist_id}: {error:#}"))?;
+        Ok(ArtistPage {
+            name: artist.name,
+            cover: artist.cover_large,
+            biography: artist.biography,
+            top: songs(artist.top_tracks, &slug),
+            albums: artist.albums.into_iter().map(release).collect(),
+        })
+    }
+
+    /// Hearts a song in its provider's library, or takes the heart away.
+    pub fn set_liked(&self, song: Song, liked: bool) -> Result<(), MobileError> {
+        let api = lock(&self.shared.slots)
+            .get(&song.provider)
+            .and_then(|slot| slot.session.as_ref())
+            .map(|session| session.api.clone())
+            .ok_or_else(|| MobileError::Failed(format!("{} is not signed in", song.provider)))?;
+        self.runtime
+            .block_on(api.set_track_saved(&song.id, liked))
+            .inspect_err(|error| log::warn!("mobile: cannot like {}: {error:#}", song.id))?;
+        Ok(())
+    }
+
+    /// A song's lyrics, synced where any source has them in time, plain otherwise, or none.
+    pub fn lyrics(&self, song: Song) -> Option<Words> {
+        let query = music::LyricsQuery {
+            title: song.title.clone(),
+            artist: song.artist.clone(),
+            album: Some(song.album.clone()).filter(|album| !album.is_empty()),
+            duration: Duration::from_millis(song.duration_ms),
+            track: None,
+        };
+        let sources: Vec<Arc<dyn music::LyricsProvider>> = vec![
+            Arc::new(music::local::LocalLyrics),
+            Arc::new(music::lrclib::LrcLib::new()),
+            Arc::new(music::youtube::YouTubeLyrics::new()),
+            Arc::new(music::netease::NetEase::new()),
+            Arc::new(music::binimum::Binimum::new()),
+        ];
+        let hits: Vec<music::LyricsHit> = self.runtime.block_on(async {
+            let mut hits = Vec::new();
+            for source in sources {
+                match source.search(&query).await {
+                    Ok(found) => hits.extend(found.into_iter().filter(|hit| !hit.instrumental)),
+                    Err(error) => log::info!("mobile: {} has no lyrics: {error:#}", source.name()),
+                }
+            }
+            hits
+        });
+        let synced = |hit: &music::LyricsHit| matches!(hit.lyrics, music::Lyrics::Synced { .. });
+        let best = hits
+            .iter()
+            .filter(|hit| synced(hit))
+            .max_by_key(|hit| hit.trust)
+            .or_else(|| hits.iter().max_by_key(|hit| hit.trust))?;
+        let lines = match &best.lyrics {
+            music::Lyrics::Synced { lines } => lines
+                .iter()
+                .map(|line| Line {
+                    start_ms: millis(line.start),
+                    end_ms: line.end.map(millis),
+                    text: line.text.clone(),
+                    romanized: line.romanized.as_ref().map(|it| it.text.clone()),
+                    words: line
+                        .words
+                        .iter()
+                        .flatten()
+                        .map(|word| Word {
+                            start_ms: millis(word.start),
+                            end_ms: millis(word.end),
+                            text: word.text.clone(),
+                        })
+                        .collect(),
+                })
+                .collect(),
+            music::Lyrics::Plain { text, romanized } => {
+                // the romanisation is of the whole text, so it only lines up when it kept the
+                // line breaks
+                let roman: Vec<&str> = romanized
+                    .as_ref()
+                    .map(|it| it.text.lines().collect())
+                    .unwrap_or_default();
+                let count = text.lines().count();
+                text.lines()
+                    .enumerate()
+                    .map(|(at, line)| Line {
+                        start_ms: 0,
+                        end_ms: None,
+                        text: line.to_owned(),
+                        romanized: (roman.len() == count)
+                            .then(|| roman[at].to_owned())
+                            .filter(|it| !it.is_empty() && it != line),
+                        words: Vec::new(),
+                    })
+                    .collect()
+            }
+        };
+        Some(Words {
+            synced: synced(best),
+            lines,
+            source: best.source.to_owned(),
+        })
+    }
+
+    /// What the equalizer is set to now.
+    pub fn sound(&self) -> Sound {
+        let writer = lock(&self.equalizer);
+        let curve = writer.curve();
+        let gains = match curve.filters().len() == BANDS {
+            true => curve.filters().iter().map(|filter| filter.gain()).collect(),
+            false => vec![0.; BANDS],
+        };
+        Sound {
+            enabled: writer.enabled(),
+            gains,
+            preset: music::equalizer::Preset::matching(curve).map(|preset| preset.id().to_owned()),
+        }
+    }
+
+    /// The ids of the built-in presets, in the order a picker lists them.
+    pub fn presets(&self) -> Vec<String> {
+        music::equalizer::Preset::ALL
+            .iter()
+            .map(|preset| preset.id().to_owned())
+            .collect()
+    }
+
+    /// The ten band gains the preset `id` sets, or flat for an id there is no preset for.
+    pub fn preset_gains(&self, id: String) -> Vec<f64> {
+        music::equalizer::Preset::ALL
+            .into_iter()
+            .find(|preset| preset.id() == id)
+            .map(|preset| {
+                preset
+                    .curve()
+                    .filters()
+                    .iter()
+                    .map(|filter| filter.gain())
+                    .collect()
+            })
+            .unwrap_or_else(|| vec![0.; BANDS])
+    }
+
+    /// Turns the equalizer on or off, keeping its curve.
+    pub fn set_equalizer_enabled(&self, enabled: bool) {
+        lock(&self.equalizer).set_enabled(enabled);
+    }
+
+    /// Plays the graphic equalizer at `gains` decibels per band, gliding from the curve before
+    /// so a dragged slider never clicks.
+    pub fn set_bands(&self, gains: Vec<f64>) {
+        lock(&self.equalizer).set_curve(Curve::bands(&gains), music::equalizer::Edit::Glide);
+    }
+
+    /// Plays a correction written in Equalizer APO's format, the one AutoEq publishes, and turns
+    /// the equalizer on. Filters it cannot play are left out, which the log records.
+    pub fn set_profile(&self, text: String) -> Result<(), MobileError> {
+        let parsed = music::equalizer::apo::parse(&text).map_err(|refused| {
+            MobileError::Failed(format!("cannot read the correction: {refused:?}"))
+        })?;
+        if !parsed.skipped.is_empty() {
+            log::info!(
+                "mobile: the correction leaves out {} lines",
+                parsed.skipped.len()
+            );
+        }
+        let mut writer = lock(&self.equalizer);
+        writer.set_curve(parsed.curve, music::equalizer::Edit::Replace);
+        writer.set_enabled(true);
+        Ok(())
+    }
+
+    /// The headphones AutoEq has a correction for whose name holds every word of `query`, at
+    /// most a hundred. The list is fetched once and kept in the cache folder.
+    pub fn headphones(&self, query: String) -> Result<Vec<Headphone>, MobileError> {
+        let all = self.headphone_index()?;
+        let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
+        Ok(all
+            .iter()
+            .filter(|headphone| {
+                let name = headphone.name.to_lowercase();
+                words.iter().all(|word| name.contains(word.as_str()))
+            })
+            .take(HEADPHONE_RESULTS)
+            .cloned()
+            .collect())
+    }
+
+    /// Fetches AutoEq's parametric correction for `headphone`, plays it and hands back its text,
+    /// which the app keeps and plays again with `set_profile` next run.
+    pub fn apply_headphone(&self, headphone: Headphone) -> Result<String, MobileError> {
+        let folder = headphone
+            .path
+            .trim_start_matches("./")
+            .trim_end_matches('/');
+        let file = folder.rsplit('/').next().unwrap_or(folder);
+        let url = format!("{AUTOEQ}/{folder}/{file}%20ParametricEQ.txt");
+        let text = self.runtime.block_on(fetch(&url))?;
+        self.set_profile(text.clone())?;
+        Ok(text)
+    }
+
+    /// The identifier YouTube is waiting on a proof-of-origin token for, taken so one ask leads
+    /// to one mint.
+    pub fn potoken_wanted(&self) -> Option<String> {
+        music::potoken::wanted()
+    }
+
+    /// Files a token the app's web view minted for `binding`.
+    pub fn potoken_give(&self, binding: String, token: String) {
+        music::potoken::give(&binding, token);
+    }
+
+    /// Records that a mint failed, which holds the next one off for a while.
+    pub fn potoken_failed(&self) {
+        music::potoken::failed();
+    }
+
+    /// Records whether the app has an attested minting page open.
+    pub fn potoken_set_warm(&self, warm: bool) {
+        music::potoken::set_warm(warm);
+    }
+
+    /// The page the minting web view opens for `binding`, with the binding in its query.
+    pub fn potoken_page(&self, binding: String) -> String {
+        format!(
+            "{POTOKEN_PAGE}?binding={}",
+            music::escape::component(&binding)
+        )
+    }
+
+    /// The script the minting page runs at document start, the desktop's own.
+    pub fn potoken_script(&self) -> String {
+        include_str!("../../state/src/potoken.js").to_owned()
+    }
+
+    /// Plays a station of songs like `song`, the song itself first, and keeps following it as
+    /// the queue runs out.
+    pub fn start_radio(&self, song: Song) -> Result<(), MobileError> {
+        let api = api_of(&self.shared, &song.provider)
+            .ok_or_else(|| MobileError::Failed(format!("{} is not signed in", song.provider)))?;
+        let (tracks, from) = self
+            .runtime
+            .block_on(api.track_radio(&song.id, None))
+            .inspect_err(|error| log::warn!("mobile: cannot start a radio: {error:#}"))?;
+        let mut queue = vec![song.clone()];
+        queue.extend(
+            songs(tracks, &song.provider)
+                .into_iter()
+                .filter(|other| other.id != song.id),
+        );
+        *lock(&self.shared.station) = Some(Station {
+            provider: song.provider.clone(),
+            seed: song.id,
+            from,
+        });
+        self.play_queue(queue, 0);
+        Ok(())
+    }
+
+    /// Whether the queue carries on with similar songs once it runs out.
+    pub fn set_autoplay(&self, on: bool) {
+        self.shared
+            .autoplay
+            .store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Pauses after `minutes`, or once the song playing ends when `end_of_song` is set. A
+    /// minute count of zero without the end of the song cancels the timer.
+    pub fn set_sleep_timer(&self, minutes: u32, end_of_song: bool) {
+        self.shared
+            .stop_at_end
+            .store(end_of_song, std::sync::atomic::Ordering::Relaxed);
+        let mut timer = lock(&self.sleep);
+        if let Some(running) = timer.take() {
+            running.abort();
+        }
+        if minutes == 0 || end_of_song {
+            return;
+        }
+        let shared = self.shared.clone();
+        *timer = Some(self.runtime.spawn(async move {
+            tokio::time::sleep(Duration::from_secs(u64::from(minutes) * 60)).await;
+            log::info!("mobile: the sleep timer paused playback");
+            if let Some(player) = current_player(&shared) {
+                player.pause();
+            }
+        }));
+    }
+
+    /// The queue as it stands, the song playing among it at the status's `index`.
+    pub fn queue(&self) -> Vec<Song> {
+        lock(&self.shared.queue).songs.clone()
+    }
+
+    /// Puts `song` straight after the one playing, or starts it when nothing is queued.
+    pub fn play_next(&self, song: Song) {
+        let start = {
+            let mut queue = lock(&self.shared.queue);
+            let empty = queue.songs.is_empty();
+            let at = match empty {
+                true => 0,
+                false => queue.index + 1,
+            };
+            queue.songs.insert(at, song);
+            empty
+        };
+        self.after_queue_change(start);
+    }
+
+    /// Puts `song` at the end of the queue, or starts it when nothing is queued.
+    pub fn add_to_queue(&self, song: Song) {
+        let start = {
+            let mut queue = lock(&self.shared.queue);
+            let empty = queue.songs.is_empty();
+            queue.songs.push(song);
+            empty
+        };
+        self.after_queue_change(start);
+    }
+
+    /// Takes the song at `index` out of the queue. The one playing stays where it is.
+    pub fn remove_from_queue(&self, index: u32) {
+        {
+            let mut queue = lock(&self.shared.queue);
+            let index = index as usize;
+            if index >= queue.songs.len() || index == queue.index {
+                return;
+            }
+            queue.songs.remove(index);
+            if index < queue.index {
+                queue.index -= 1;
+            }
+        }
+        self.after_queue_change(false);
+    }
+
+    /// Plays the queue's song at `index`.
+    pub fn jump(&self, index: u32) {
+        {
+            let mut queue = lock(&self.shared.queue);
+            if index as usize >= queue.songs.len() {
+                return;
+            }
+            queue.index = index as usize;
+        }
+        load_current(&self.shared);
+    }
+
+    /// Replaces the queue with `songs` and plays the one at `start`. The queue follows no
+    /// station until autoplay seeds one.
+    pub fn play(&self, songs: Vec<Song>, start: u32) {
+        *lock(&self.shared.station) = None;
+        self.play_queue(songs, start as usize);
+    }
+
+    /// Pauses a playing track and resumes a paused one.
+    pub fn toggle(&self) {
+        let playing = lock(&self.shared.status).state == PlayState::Playing;
+        if let Some(player) = current_player(&self.shared) {
+            match playing {
+                true => player.pause(),
+                false => player.play(),
+            }
+        }
+    }
+
+    /// Plays the next song in the queue, if there is one.
+    pub fn next(&self) {
+        if advance(&self.shared) {
+            load_current(&self.shared);
+        }
+    }
+
+    /// Restarts the song a few seconds in, and goes back a song otherwise.
+    pub fn previous(&self) {
+        let position = Duration::from_millis(lock(&self.shared.status).position_ms);
+        let back = {
+            let mut queue = lock(&self.shared.queue);
+            let back = position < RESTART && queue.index > 0;
+            if back {
+                queue.index -= 1;
+            }
+            back
+        };
+        match back {
+            true => load_current(&self.shared),
+            false => self.seek(0),
+        }
+    }
+
+    /// Moves to `position_ms` in the current song.
+    pub fn seek(&self, position_ms: u64) {
+        if let Some(player) = current_player(&self.shared) {
+            player.seek(Duration::from_millis(position_ms));
+        }
+    }
+
+    /// The status as it stands, for a screen that comes up between changes.
+    pub fn status(&self) -> Status {
+        lock(&self.shared.status).clone()
+    }
+}
+
+impl Digida {
+    /// AutoEq's list of headphones, from memory, the cache folder or the network in that order.
+    fn headphone_index(&self) -> Result<Arc<Vec<Headphone>>, MobileError> {
+        if let Some(index) = lock(&self.headphones).clone() {
+            return Ok(index);
+        }
+        let path = self.cache.join("autoeq-index.md");
+        let fresh = std::fs::metadata(&path)
+            .and_then(|meta| meta.modified())
+            .is_ok_and(|at| at.elapsed().is_ok_and(|age| age < AUTOEQ_KEEP));
+        let text = match fresh {
+            true => std::fs::read_to_string(&path).map_err(anyhow::Error::from)?,
+            false => {
+                let text = self
+                    .runtime
+                    .block_on(fetch(&format!("{AUTOEQ}/INDEX.md")))?;
+                if let Err(error) = std::fs::write(&path, &text) {
+                    log::warn!("mobile: cannot keep the AutoEq list: {error}");
+                }
+                text
+            }
+        };
+        let index = Arc::new(text.lines().filter_map(headphone).collect::<Vec<_>>());
+        *lock(&self.headphones) = Some(index.clone());
+        Ok(index)
+    }
+
+    /// Replaces the queue with `songs` and plays the one at `start`, leaving the station alone.
+    fn play_queue(&self, songs: Vec<Song>, start: usize) {
+        {
+            let mut queue = lock(&self.shared.queue);
+            queue.index = start.min(songs.len().saturating_sub(1));
+            queue.songs = songs;
+        }
+        load_current(&self.shared);
+    }
+
+    /// Starts the queue's first song when a change put one into an empty queue, and otherwise
+    /// tells the listener the queue's new length.
+    fn after_queue_change(&self, start: bool) {
+        if start {
+            load_current(&self.shared);
+            return;
+        }
+        let (index, length) = {
+            let queue = lock(&self.shared.queue);
+            (queue.index, queue.songs.len())
+        };
+        {
+            let mut status = lock(&self.shared.status);
+            status.index = index as u32;
+            status.queue_length = length as u32;
+        }
+        tell(&self.shared);
+    }
+
+    /// The provider named `slug`, or why there is none.
+    fn provider(&self, slug: &str) -> Result<Arc<dyn MusicProvider>, MobileError> {
+        lock(&self.shared.slots)
+            .get(slug)
+            .map(|slot| slot.provider.clone())
+            .ok_or_else(|| MobileError::Failed(format!("there is no provider called {slug}")))
+    }
+
+    /// The shown provider's library, its shape and its slug, or why it has none yet.
+    fn library(&self) -> Result<(Arc<dyn MusicApi>, Shape, String), MobileError> {
+        let slug = lock(&self.active).clone();
+        lock(&self.shared.slots)
+            .get(&slug)
+            .and_then(|slot| slot.session.as_ref())
+            .map(|session| (session.api.clone(), session.shape, slug.clone()))
+            .ok_or_else(|| MobileError::Failed(format!("{slug} is not signed in")))
+    }
+
+    /// Keeps a fresh session for `slug` and starts its engine the first time, listening to it
+    /// for as long as it runs.
+    fn keep(&self, slug: &str, session: ProviderSession) {
+        let started = {
+            let mut slots = lock(&self.shared.slots);
+            let Some(slot) = slots.get_mut(slug) else {
+                return;
+            };
+            let started = match slot.player.is_none() {
+                true => {
+                    let (player, events) = session.playback.start(self.config.clone());
+                    slot.player = Some(Arc::from(player));
+                    Some(events)
+                }
+                false => None,
+            };
+            slot.session = Some(session);
+            started
+        };
+        if let Some(events) = started {
+            listen(&self.runtime, self.shared.clone(), slug.to_owned(), events);
+        }
+    }
+}
+
+/// Follows one engine's events for as long as it runs. Only the engine playing the queue moves
+/// the status; when its song ends the queue moves on.
+fn listen(
+    runtime: &Runtime,
+    shared: Arc<Shared>,
+    slug: String,
+    mut events: Box<dyn music::PlaybackEvents>,
+) {
+    runtime.spawn(async move {
+        while let Some(event) = events.next().await {
+            if lock(&shared.playing).as_deref() != Some(slug.as_str()) {
+                continue;
+            }
+            let ended = matches!(
+                event,
+                PlaybackEvent::Ended { .. } | PlaybackEvent::Unavailable { .. }
+            );
+            let refusal = match &event {
+                PlaybackEvent::Unavailable { .. } => Some("cannot play the track"),
+                PlaybackEvent::Throttled { .. } => Some("was turned down for now"),
+                PlaybackEvent::Refused => Some("was refused"),
+                PlaybackEvent::Gated => Some("needs something before it plays"),
+                _ => None,
+            };
+            if let Some(refusal) = refusal {
+                log::warn!("mobile: the {slug} engine {refusal} ({:?})", event.id());
+            }
+            let changed = fold(&mut lock(&shared.status), &event);
+            if changed {
+                tell(&shared);
+            }
+            if ended {
+                // the sleep timer's end of song pauses here, ready to carry on from the next one
+                if shared
+                    .stop_at_end
+                    .swap(false, std::sync::atomic::Ordering::Relaxed)
+                {
+                    if advance(&shared) {
+                        load_current(&shared);
+                        if let Some(player) = current_player(&shared) {
+                            player.pause();
+                        }
+                    }
+                    continue;
+                }
+                let more = advance(&shared)
+                    || (shared.autoplay.load(std::sync::atomic::Ordering::Relaxed)
+                        && extend(&shared).await
+                        && advance(&shared));
+                match more {
+                    true => load_current(&shared),
+                    false => {
+                        lock(&shared.status).state = PlayState::Idle;
+                        tell(&shared);
+                    }
+                }
+            }
+        }
+        log::warn!("mobile: the {slug} engine stopped");
+    });
+}
+
+/// Adds the next stretch of the queue's station, seeding one from the last song when the queue
+/// follows none, and answers whether any song came. Songs already queued are left out.
+async fn extend(shared: &Shared) -> bool {
+    // a station with more to come carries on, and otherwise the last song seeds a fresh one
+    let station = lock(&shared.station)
+        .clone()
+        .filter(|station| station.from.is_some())
+        .or_else(|| {
+            let queue = lock(&shared.queue);
+            queue.songs.last().map(|last| Station {
+                provider: last.provider.clone(),
+                seed: last.id.clone(),
+                from: None,
+            })
+        });
+    let Some(station) = station else {
+        return false;
+    };
+    let Some(api) = api_of(shared, &station.provider) else {
+        return false;
+    };
+    let fetched = api
+        .track_radio(&station.seed, station.from.as_deref())
+        .await
+        .inspect_err(|error| log::info!("mobile: autoplay found nothing more: {error:#}"));
+    let Ok((tracks, from)) = fetched else {
+        return false;
+    };
+    *lock(&shared.station) = Some(Station {
+        from,
+        ..station.clone()
+    });
+    let fresh = {
+        let mut queue = lock(&shared.queue);
+        let known: std::collections::HashSet<String> =
+            queue.songs.iter().map(|song| song.id.clone()).collect();
+        let fresh: Vec<Song> = songs(tracks, &station.provider)
+            .into_iter()
+            .filter(|song| !known.contains(&song.id))
+            .collect();
+        let count = fresh.len();
+        queue.songs.extend(fresh);
+        count
+    };
+    log::info!("mobile: autoplay queued {fresh} more songs");
+    fresh > 0
+}
+
+/// The library of the provider `slug`, when it is signed in.
+fn api_of(shared: &Shared, slug: &str) -> Option<Arc<dyn MusicApi>> {
+    lock(&shared.slots)
+        .get(slug)
+        .and_then(|slot| slot.session.as_ref())
+        .map(|session| session.api.clone())
+}
+
+/// Moves the queue on a song, answering whether there was one to move to.
+fn advance(shared: &Shared) -> bool {
+    let mut queue = lock(&shared.queue);
+    let more = queue.index + 1 < queue.songs.len();
+    if more {
+        queue.index += 1;
+    }
+    more
+}
+
+/// The engine playing the queue now.
+fn current_player(shared: &Shared) -> Option<Arc<dyn Player>> {
+    let playing = lock(&shared.playing).clone()?;
+    lock(&shared.slots)
+        .get(&playing)
+        .and_then(|slot| slot.player.clone())
+}
+
+/// Loads the queue's current song into its provider's engine, pausing another provider's
+/// engine that was playing, and puts the song in the status.
+fn load_current(shared: &Shared) {
+    let (song, index, length) = {
+        let queue = lock(&shared.queue);
+        (
+            queue.songs.get(queue.index).cloned(),
+            queue.index,
+            queue.songs.len(),
+        )
+    };
+    let Some(song) = song else {
+        return;
+    };
+    let before = lock(&shared.playing).replace(song.provider.clone());
+    if let Some(before) = before.filter(|before| *before != song.provider)
+        && let Some(player) = lock(&shared.slots)
+            .get(&before)
+            .and_then(|slot| slot.player.clone())
+    {
+        player.pause();
+    }
+    {
+        let mut status = lock(&shared.status);
+        status.state = PlayState::Loading;
+        status.position_ms = 0;
+        status.duration_ms = song.duration_ms;
+        status.index = index as u32;
+        status.queue_length = length as u32;
+        status.song = Some(song.clone());
+    }
+    tell(shared);
+
+    let player = lock(&shared.slots)
+        .get(&song.provider)
+        .and_then(|slot| slot.player.clone());
+    match player {
+        Some(player) => {
+            log::info!("mobile: loading {} from {}", song.id, song.provider);
+            if let Err(error) = player.load(&song.id, Duration::ZERO, false) {
+                log::warn!("mobile: cannot load {}: {error:#}", song.id);
+            }
+        }
+        None => log::warn!(
+            "mobile: {} is not signed in, so {} cannot play",
+            song.provider,
+            song.id
+        ),
+    }
+}
+
+/// Folds one engine event into the status, answering whether anything the app draws moved.
+fn fold(status: &mut Status, event: &PlaybackEvent) -> bool {
+    let at = |at: &Duration| at.as_millis() as u64;
+    match event {
+        PlaybackEvent::Loading { at: position, .. } => {
+            status.state = PlayState::Loading;
+            status.position_ms = at(position);
+        }
+        PlaybackEvent::Playing { at: position, .. } => {
+            status.state = PlayState::Playing;
+            status.position_ms = at(position);
+        }
+        PlaybackEvent::Paused { at: position, .. } => {
+            status.state = PlayState::Paused;
+            status.position_ms = at(position);
+        }
+        PlaybackEvent::Position { at: position, .. }
+        | PlaybackEvent::Seeked { at: position, .. } => status.position_ms = at(position),
+        PlaybackEvent::Length { duration, .. } => status.duration_ms = at(duration),
+        _ => return false,
+    }
+    true
+}
+
+/// Tells the listener the status as it stands.
+fn tell(shared: &Shared) {
+    let snapshot = lock(&shared.status).clone();
+    let listener = lock(&shared.listener).clone();
+    if let Some(listener) = listener {
+        listener.changed(snapshot);
+    }
+}
+
+fn idle() -> Status {
+    Status {
+        state: PlayState::Idle,
+        song: None,
+        position_ms: 0,
+        duration_ms: 0,
+        index: 0,
+        queue_length: 0,
+    }
+}
+
+/// The method the app offers for one of a provider's sign-in options, leaving out a folder
+/// pick, which only local files take and through [`Digida::scan`].
+fn method(option: SignIn) -> Option<Method> {
+    match option {
+        SignIn::Default => Some(Method::Browser),
+        SignIn::Anonymous => Some(Method::Guest),
+        SignIn::Secret => Some(Method::Cookies),
+        SignIn::Credentials {
+            server,
+            username,
+            password,
+        } => Some(Method::Credentials {
+            server,
+            username,
+            password,
+        }),
+        SignIn::Path(_) => None,
+    }
+}
+
+/// The provider's own sign-in for a method the app chose.
+fn sign_in(method: Method) -> SignIn {
+    match method {
+        Method::Browser => SignIn::Default,
+        Method::Guest => SignIn::Anonymous,
+        Method::Cookies => SignIn::Secret,
+        Method::Credentials {
+            server,
+            username,
+            password,
+        } => SignIn::Credentials {
+            server,
+            username,
+            password,
+        },
+    }
+}
+
+/// A sign-in prompt in the shape the app reads.
+fn relay(prompt: SignInPrompt) -> Prompt {
+    match prompt {
+        SignInPrompt::Url(url) => Prompt::Url { url },
+        SignInPrompt::Code { code, url } => Prompt::Code { code, url },
+        SignInPrompt::Secret => Prompt::Cookies,
+        SignInPrompt::Accounts(accounts) => Prompt::Accounts {
+            accounts: accounts
+                .into_iter()
+                .map(|account| Account {
+                    id: account.id,
+                    name: account.name,
+                    detail: account.detail,
+                })
+                .collect(),
+        },
+    }
+}
+
+/// The tracks of `provider` the app can list, which need an id to be played by.
+fn songs(tracks: Vec<Track>, provider: &str) -> Vec<Song> {
+    tracks
+        .into_iter()
+        .filter_map(|track| {
+            Some(Song {
+                id: track.id?,
+                provider: provider.to_owned(),
+                title: track.name,
+                artist: track.artists,
+                album: track.album,
+                album_id: track.album_id,
+                artist_id: track
+                    .artist_refs
+                    .iter()
+                    .find_map(|artist| artist.id.clone()),
+                cover: track.cover,
+                duration_ms: track.duration.as_millis() as u64,
+            })
+        })
+        .collect()
+}
+
+/// A home feed card the app can open, as one it knows how to draw.
+fn tile(item: music::GenreItem, provider: &str) -> Option<Tile> {
+    Some(match item {
+        music::GenreItem::Track(track) => {
+            let song = songs(vec![track], provider).pop()?;
+            Tile {
+                kind: TileKind::Song,
+                id: song.id.clone(),
+                title: song.title.clone(),
+                subtitle: song.artist.clone(),
+                cover: song.cover.clone(),
+                song: Some(song),
+            }
+        }
+        music::GenreItem::Album(album) => Tile {
+            kind: TileKind::Album,
+            id: album.id,
+            title: album.name,
+            subtitle: album.artists,
+            cover: album.cover_large.or(album.cover),
+            song: None,
+        },
+        music::GenreItem::Playlist(playlist) => Tile {
+            kind: TileKind::Playlist,
+            id: playlist.id,
+            title: playlist.name,
+            subtitle: playlist.owner,
+            cover: playlist.cover,
+            song: None,
+        },
+        music::GenreItem::Artist(artist) => Tile {
+            kind: TileKind::Artist,
+            id: artist.id,
+            title: artist.name,
+            subtitle: String::new(),
+            cover: artist.cover,
+            song: None,
+        },
+        music::GenreItem::Genre(genre) => Tile {
+            kind: TileKind::Genre,
+            id: genre.id,
+            title: genre.name,
+            subtitle: String::new(),
+            cover: genre.cover,
+            song: None,
+        },
+    })
+}
+
+fn release(album: Album) -> Release {
+    Release {
+        id: album.id,
+        title: album.name,
+        artist: album.artists,
+        cover: album.cover_large.or(album.cover),
+        year: album.year,
+        track_count: album.track_count,
+    }
+}
+
+fn list(playlist: Listing) -> Playlist {
+    Playlist {
+        id: playlist.id,
+        title: playlist.name,
+        owner: playlist.owner,
+        cover: playlist.cover,
+        track_count: playlist.track_count,
+    }
+}
+
+/// Registers the app with the parts of the core that call back into Android: the audio output,
+/// which finds the phone's speakers through the process's context, and the certificate
+/// verifier, which checks every HTTPS connection against the phone's own trust store. Called
+/// once per process from `Tls.init` in Kotlin, before anything plays or reaches the network.
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_github_deejaykyle_digida_Tls_init<'local>(
+    mut env: jni::EnvUnowned<'local>,
+    _class: jni::objects::JClass<'local>,
+    context: jni::objects::JObject<'local>,
+) {
+    env.with_env(|env| -> jni::errors::Result<()> {
+        let vm = env.get_java_vm()?;
+        // The global reference is never released: the context has to outlive every audio
+        // stream, and the process is what ends it.
+        let app = env.new_global_ref(&context)?.into_raw();
+        // SAFETY: both pointers are valid for the life of the process, the VM because there is
+        // one per process and the context because its global reference is never deleted, and
+        // this runs once, before anything reads the context.
+        unsafe { ndk_context::initialize_android_context(vm.get_raw().cast(), app.cast()) };
+        rustls_platform_verifier::android::init_with_env(env, context)
+    })
+    .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
+/// Gathers the phone's trusted certificates into one file and points `SSL_CERT_FILE` at it.
+/// Spotify's client looks for certificates where a Linux system keeps them, and Android keeps
+/// them elsewhere, one file per certificate: in the Conscrypt module since Android 14, and under
+/// `/system` before it. A certificate file holds its PEM block beside a text dump, which the
+/// readers skip.
+#[cfg(target_os = "android")]
+fn trust(cache: &std::path::Path) {
+    let stores = [
+        "/apex/com.android.conscrypt/cacerts",
+        "/system/etc/security/cacerts",
+    ];
+    let Some(entries) = stores
+        .iter()
+        .find_map(|store| std::fs::read_dir(store).ok())
+    else {
+        log::warn!("mobile: the phone names no trusted certificates");
+        return;
+    };
+    let mut bundle = Vec::new();
+    for entry in entries.flatten() {
+        if let Ok(certificate) = std::fs::read(entry.path()) {
+            bundle.extend_from_slice(&certificate);
+            bundle.push(b'\n');
+        }
+    }
+    let path = cache.join("ca-bundle.pem");
+    if let Err(error) = std::fs::create_dir_all(cache).and_then(|()| std::fs::write(&path, &bundle))
+    {
+        log::warn!("mobile: cannot write the certificate bundle: {error}");
+        return;
+    }
+    // SAFETY: this runs in the core's constructor before the core starts a thread of its own,
+    // and nothing on the Java side reads the process environment.
+    unsafe { std::env::set_var("SSL_CERT_FILE", &path) };
+}
+
+/// Locks a mutex, taking it over from a thread that panicked while holding it.
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// How many of the latest log lines the diagnostics keep.
+/// A duration in whole milliseconds.
+fn millis(at: Duration) -> u64 {
+    at.as_millis() as u64
+}
+
+/// Fetches `url` as text.
+async fn fetch(url: &str) -> Result<String, MobileError> {
+    let response = reqwest::get(url)
+        .await
+        .and_then(reqwest::Response::error_for_status)
+        .map_err(|error| MobileError::Failed(format!("cannot fetch {url}: {error}")))?;
+    response
+        .text()
+        .await
+        .map_err(|error| MobileError::Failed(format!("cannot read {url}: {error}")))
+}
+
+/// One headphone out of a line of AutoEq's index, which reads
+/// `- [Name](./source/rig/Name) by source on rig`.
+fn headphone(line: &str) -> Option<Headphone> {
+    let rest = line.strip_prefix("- [")?;
+    let (name, rest) = rest.split_once("](")?;
+    let (path, source) = match rest.rsplit_once(") by ") {
+        Some((path, by)) => (path, by.split(" on ").next().unwrap_or(by)),
+        None => (rest.strip_suffix(')')?, ""),
+    };
+    Some(Headphone {
+        name: name.to_owned(),
+        source: source.trim().to_owned(),
+        path: path.to_owned(),
+    })
+}
+
+const LOG_LINES: usize = 400;
+
+/// The latest log lines, for the diagnostics screen to show and copy.
+static RECENT: Mutex<std::collections::VecDeque<String>> =
+    Mutex::new(std::collections::VecDeque::new());
+
+/// Keeps the latest log lines for the diagnostics and, on Android, hands every line to logcat
+/// as well.
+struct Recorder {
+    #[cfg(target_os = "android")]
+    logcat: android_logger::AndroidLogger,
+}
+
+impl log::Log for Recorder {
+    fn enabled(&self, metadata: &log::Metadata) -> bool {
+        metadata.level() <= log::Level::Info
+    }
+
+    fn log(&self, record: &log::Record) {
+        if !self.enabled(record.metadata()) {
+            return;
+        }
+        #[cfg(target_os = "android")]
+        self.logcat.log(record);
+        let mut recent = lock(&RECENT);
+        if recent.len() == LOG_LINES {
+            recent.pop_front();
+        }
+        recent.push_back(format!(
+            "{} {}: {}",
+            record.level(),
+            record.target(),
+            record.args()
+        ));
+    }
+
+    fn flush(&self) {}
+}
+
+/// Starts keeping the log, once per process.
+fn logging() {
+    let recorder = Recorder {
+        #[cfg(target_os = "android")]
+        logcat: android_logger::AndroidLogger::new(
+            android_logger::Config::default()
+                .with_max_level(log::LevelFilter::Info)
+                .with_tag("digida"),
+        ),
+    };
+    if log::set_logger(Box::leak(Box::new(recorder))).is_ok() {
+        log::set_max_level(log::LevelFilter::Info);
+    }
+}
+
+/// The latest lines of the core's log, oldest first, for the diagnostics screen.
+#[uniffi::export]
+pub fn recent_log() -> Vec<String> {
+    lock(&RECENT).iter().cloned().collect()
+}

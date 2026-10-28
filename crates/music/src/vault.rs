@@ -1119,7 +1119,7 @@ fn footprint(path: &Path) -> u64 {
 
 /// Sonora's downloads folder, `$XDG_DATA_HOME/sonora/downloads`.
 fn pinned_root() -> PathBuf {
-    dirs::data_local_dir()
+    storage::folders::data_dir()
         .unwrap_or_else(std::env::temp_dir)
         .join("digida")
         .join("downloads")
