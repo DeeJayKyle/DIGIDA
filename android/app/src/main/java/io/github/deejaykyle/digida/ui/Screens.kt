@@ -661,11 +661,15 @@ private fun PlayerScreen(status: Status, library: Library, onClose: () -> Unit) 
             enter = slideInVertically(spring(dampingRatio = 0.85f, stiffness = 420f)) { it } + fadeIn(),
             exit = slideOutVertically(tween(280)) { it } + fadeOut(tween(280)),
         ) {
-            Box(Modifier.fillMaxSize().background(palette.page.copy(alpha = 0.94f)).statusBarsPadding().navigationBarsPadding()) {
-                when (panel) {
-                    Panel.Queue -> QueuePanel(status, library) { panel = null }
-                    Panel.Lyrics -> LyricsPanel(status, library) { panel = null }
-                    null -> Unit
+            // the panel paints its own opaque page, so nothing of the player reads through it
+            Box(Modifier.fillMaxSize()) {
+                Backdrop(palette)
+                Box(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding()) {
+                    when (panel) {
+                        Panel.Queue -> QueuePanel(status, library) { panel = null }
+                        Panel.Lyrics -> LyricsPanel(status, library) { panel = null }
+                        null -> Unit
+                    }
                 }
             }
         }

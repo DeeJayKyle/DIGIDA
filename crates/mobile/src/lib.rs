@@ -355,6 +355,11 @@ impl Digida {
         normalise: bool,
     ) -> Result<Arc<Self>, MobileError> {
         logging();
+        // Two rustls backends are compiled in, as on the desktop, and rustls refuses to guess
+        // between them, so one is picked before anything opens a connection.
+        rustls::crypto::ring::default_provider()
+            .install_default()
+            .ok();
         #[cfg(target_os = "android")]
         trust(std::path::Path::new(&cache_dir));
         let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -741,12 +746,17 @@ impl Digida {
             hits
         });
         let synced = |hit: &music::LyricsHit| matches!(hit.lyrics, music::Lyrics::Synced { .. });
+        // among synced lyrics, ones timed word by word come first, since they can sweep
+        let timed = |hit: &music::LyricsHit| match &hit.lyrics {
+            music::Lyrics::Synced { lines } => lines.iter().any(|line| line.words.is_some()),
+            music::Lyrics::Plain { .. } => false,
+        };
         let best = hits
             .iter()
             .filter(|hit| synced(hit))
-            .max_by_key(|hit| hit.trust)
+            .max_by_key(|hit| (timed(hit), hit.trust))
             .or_else(|| hits.iter().max_by_key(|hit| hit.trust))?;
-        let lines = match &best.lyrics {
+        let lines: Vec<Line> = match &best.lyrics {
             music::Lyrics::Synced { lines } => lines
                 .iter()
                 .map(|line| Line {
@@ -788,6 +798,13 @@ impl Digida {
                     .collect()
             }
         };
+        log::info!(
+            "mobile: lyrics from {}, {} of {} lines timed by word, {} romanised",
+            best.source,
+            lines.iter().filter(|line| !line.words.is_empty()).count(),
+            lines.len(),
+            lines.iter().filter(|line| line.romanized.is_some()).count(),
+        );
         Some(Words {
             synced: synced(best),
             lines,
