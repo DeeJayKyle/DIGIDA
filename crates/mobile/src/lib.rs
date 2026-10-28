@@ -345,6 +345,21 @@ struct Station {
     from: Option<String>,
 }
 
+/// One search result weighed as a match: whether it is about as long, how much of the title and
+/// of the artist it holds, from none at zero to all at one, and its id.
+struct Candidate {
+    close: bool,
+    named: f64,
+    by: f64,
+    id: String,
+}
+
+impl Candidate {
+    fn score(&self) -> f64 {
+        self.named + self.by
+    }
+}
+
 /// The core. One per app process.
 #[derive(uniffi::Object)]
 pub struct Digida {
@@ -1787,33 +1802,71 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 }
 
 /// How many of the latest log lines the diagnostics keep.
-/// The YouTube Music song that is `song`, looked for by its title and artist: the result whose
-/// title and artist agree most, among those about as long, or none when nothing agrees.
+/// The YouTube Music song that is `song`, looked for by its title and first artist. Labels
+/// Spotify adds in brackets or after a dash, like "(Live)" or "- Remastered", are left out of the
+/// search, since an upload rarely carries them. A result about as long whose title and artist
+/// agree most wins; failing one, a result whose title holds the whole of the song's title and
+/// names its artist, however long it runs, since a live or cover take seldom keeps the length.
 async fn matched(shared: &Shared, song: &Song) -> Option<String> {
     let api = api_of(shared, YOUTUBE)?;
-    let query = format!("{} {}", song.title, song.artist);
+    let core = core_title(&song.title);
+    let lead = song
+        .artist
+        .split([',', '&'])
+        .next()
+        .unwrap_or(&song.artist)
+        .trim();
+    let query = format!("{core} {lead}");
     let tracks = api
         .search(&query)
         .await
         .inspect_err(|error| log::warn!("mobile: youtube cannot search for a match: {error:#}"))
         .ok()?;
-    let title = words(&song.title);
-    let artist = words(&song.artist);
-    songs(tracks, YOUTUBE)
+    let title = words(&core);
+    let artist = words(lead);
+    let scored: Vec<Candidate> = songs(tracks, YOUTUBE)
         .into_iter()
-        .filter_map(|candidate| {
-            let close = song.duration_ms == 0
+        .map(|candidate| Candidate {
+            close: song.duration_ms == 0
                 || candidate.duration_ms == 0
-                || candidate.duration_ms.abs_diff(song.duration_ms) <= MATCH_LENGTH;
-            let named = overlap(&title, &words(&candidate.title));
-            let by = overlap(
+                || candidate.duration_ms.abs_diff(song.duration_ms) <= MATCH_LENGTH,
+            named: overlap(&title, &words(&candidate.title)),
+            by: overlap(
                 &artist,
                 &words(&format!("{} {}", candidate.artist, candidate.title)),
-            );
-            (close && named > 0.5).then_some((named + by, candidate.id))
+            ),
+            id: candidate.id,
         })
-        .max_by(|a, b| a.0.total_cmp(&b.0))
-        .map(|(_, id)| id)
+        .collect();
+    let best = |keep: fn(&Candidate) -> bool| {
+        scored
+            .iter()
+            .filter(|candidate| keep(candidate))
+            .max_by(|a, b| a.score().total_cmp(&b.score()))
+            .map(|candidate| candidate.id.clone())
+    };
+    best(|candidate| candidate.close && candidate.named > 0.5)
+        .or_else(|| best(|candidate| candidate.named >= 1. && candidate.by > 0.))
+}
+
+/// A title without the labels a service adds to it: whatever is in brackets, and whatever follows
+/// a spaced dash. A title that is nothing but labels stays as it was.
+fn core_title(title: &str) -> String {
+    let mut core = String::new();
+    let mut depth = 0usize;
+    for c in title.chars() {
+        match c {
+            '(' | '[' => depth += 1,
+            ')' | ']' => depth = depth.saturating_sub(1),
+            c if depth == 0 => core.push(c),
+            _ => {}
+        }
+    }
+    let core = core.split(" - ").next().unwrap_or(&core).trim().to_owned();
+    match core.is_empty() {
+        true => title.to_owned(),
+        false => core,
+    }
 }
 
 /// The lowercase words of `text`, with punctuation dropped.
