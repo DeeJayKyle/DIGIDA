@@ -33,6 +33,8 @@ class PlaybackService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private lateinit var session: MediaSessionCompat
     private val library get() = (application as DigidaApp).library
+    /** The cover the widget last drew, and the song it belongs to, so a tick never reloads it. */
+    private var cover: Pair<String?, android.graphics.Bitmap?> = null to null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -114,6 +116,17 @@ class PlaybackService : Service() {
                 .build()
         )
         getSystemService(NotificationManager::class.java).notify(NOTIFICATION, notification(status))
+        val id = status.song?.id
+        if (cover.first == id) {
+            NowPlayingWidget.update(this, status, cover.second)
+        } else {
+            NowPlayingWidget.update(this, status, null)
+            scope.launch {
+                val bitmap = NowPlayingWidget.cover(this@PlaybackService, status.song?.cover)
+                cover = id to bitmap
+                NowPlayingWidget.update(this@PlaybackService, library.status.value, bitmap)
+            }
+        }
     }
 
     private fun notification(status: Status): Notification {
@@ -129,28 +142,32 @@ class PlaybackService : Service() {
             .setOngoing(playing)
             .setSilent(true)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
-            .addAction(android.R.drawable.ic_media_previous, getString(R.string.previous), action(ACTION_PREVIOUS))
+            .addAction(android.R.drawable.ic_media_previous, getString(R.string.previous), action(this, ACTION_PREVIOUS))
             .addAction(
                 if (playing) android.R.drawable.ic_media_pause else android.R.drawable.ic_media_play,
                 getString(if (playing) R.string.pause else R.string.play),
-                action(ACTION_TOGGLE),
+                action(this, ACTION_TOGGLE),
             )
-            .addAction(android.R.drawable.ic_media_next, getString(R.string.next), action(ACTION_NEXT))
+            .addAction(android.R.drawable.ic_media_next, getString(R.string.next), action(this, ACTION_NEXT))
             .setStyle(MediaStyle().setMediaSession(session.sessionToken).setShowActionsInCompactView(0, 1, 2))
             .build()
     }
 
-    private fun action(name: String): PendingIntent = PendingIntent.getService(
-        this, name.hashCode(), Intent(this, PlaybackService::class.java).setAction(name),
-        PendingIntent.FLAG_IMMUTABLE,
-    )
-
     companion object {
         private const val CHANNEL = "playback"
         private const val NOTIFICATION = 1
-        private const val ACTION_TOGGLE = "toggle"
-        private const val ACTION_NEXT = "next"
-        private const val ACTION_PREVIOUS = "previous"
+        const val ACTION_TOGGLE = "toggle"
+        const val ACTION_NEXT = "next"
+        const val ACTION_PREVIOUS = "previous"
+
+        /**
+         * What a notification or widget button sends: the service, started in the foreground so
+         * a press from the home screen reaches it even while the app is in the background.
+         */
+        fun action(context: Context, name: String): PendingIntent = PendingIntent.getForegroundService(
+            context, name.hashCode(), Intent(context, PlaybackService::class.java).setAction(name),
+            PendingIntent.FLAG_IMMUTABLE,
+        )
 
         fun start(context: Context) =
             context.startForegroundServiceCompat(Intent(context, PlaybackService::class.java))

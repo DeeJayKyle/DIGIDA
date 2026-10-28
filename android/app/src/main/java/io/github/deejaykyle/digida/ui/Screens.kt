@@ -93,6 +93,7 @@ sealed interface Route {
     data class Playlist(val playlist: uniffi.digida_mobile.Playlist) : Route
     data class Artist(val id: String, val name: String) : Route
     data object Settings : Route
+    data object Equalizer : Route
 }
 
 /** The page each tab opens on. */
@@ -114,7 +115,7 @@ fun App(library: Library, preferences: Preferences) {
     val stack = remember { mutableStateListOf<Route>(Route.Feed) }
     var expanded by remember { mutableStateOf(false) }
     var menu by remember { mutableStateOf<Song?>(null) }
-    val back = { stack.removeAt(stack.lastIndex) }
+    val back: () -> Unit = { stack.removeAt(stack.lastIndex) }
     val navigator = remember {
         object : Navigator {
             override fun album(release: Release) {
@@ -186,7 +187,13 @@ fun App(library: Library, preferences: Preferences) {
                         Route.Search -> SearchScreen(library, onBack = if (stack.size > 1) back else null) { songs, index ->
                             SongRow(songs[index], playing = status.song?.id == songs[index].id) { library.play(songs, index) }
                         }
-                        Route.Settings -> SettingsScreen(library, preferences, onBack = back)
+                        Route.Settings -> SettingsScreen(
+                            library,
+                            preferences,
+                            onBack = back,
+                            onEqualizer = { stack.add(Route.Equalizer) },
+                        )
+                        Route.Equalizer -> EqualizerScreen(library, onBack = back)
                     }
                 }
                 AnimatedVisibility(
@@ -218,7 +225,7 @@ fun App(library: Library, preferences: Preferences) {
 
 /** The top of a screen: a title, an optional way back and actions on the right. */
 @Composable
-private fun TopBar(
+internal fun TopBar(
     title: String,
     onBack: (() -> Unit)? = null,
     actions: @Composable () -> Unit = {},
@@ -705,7 +712,7 @@ private fun Seeker(fraction: Float, onScrub: (Float) -> Unit, onRelease: () -> U
 }
 
 @Composable
-private fun SettingsScreen(library: Library, preferences: Preferences, onBack: () -> Unit) {
+private fun SettingsScreen(library: Library, preferences: Preferences, onBack: () -> Unit, onEqualizer: () -> Unit) {
     val palette = LocalPalette.current
     val finish by preferences.finish.collectAsStateWithLifecycle()
     val mode by preferences.mode.collectAsStateWithLifecycle()
@@ -739,6 +746,28 @@ private fun SettingsScreen(library: Library, preferences: Preferences, onBack: (
             }
             item { Heading(stringResource(R.string.playback), null) }
             item { PlaybackSettings(library, preferences) }
+            item {
+                val sound by library.sound.collectAsStateWithLifecycle()
+                Pressable(
+                    onClick = onEqualizer,
+                    modifier = Modifier.fillMaxWidth().padding(top = 10.dp),
+                    contentAlignment = Alignment.CenterStart,
+                ) {
+                    Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Label(stringResource(R.string.equalizer), weight = FontWeight.SemiBold)
+                            Label(
+                                sound.headphone?.let { stringResource(R.string.headphone_applied, it) }
+                                    ?: stringResource(R.string.equalizer_detail),
+                                size = 13.sp,
+                                subtle = true,
+                                lines = 2,
+                            )
+                        }
+                        Label(stringResource(if (sound.enabled) R.string.on else R.string.off), subtle = true)
+                    }
+                }
+            }
             item { Heading(stringResource(R.string.accounts), stringResource(R.string.accounts_detail)) }
             item { Accounts(library) }
             item { Heading(stringResource(R.string.folders), stringResource(R.string.folders_detail)) }
@@ -814,7 +843,7 @@ private fun SettingsScreen(library: Library, preferences: Preferences, onBack: (
 }
 
 @Composable
-private fun Heading(title: String, detail: String?) {
+internal fun Heading(title: String, detail: String?) {
     Column(Modifier.padding(top = 22.dp, bottom = 12.dp)) {
         Label(title.uppercase(), size = 12.sp, weight = FontWeight.Bold, subtle = true)
         if (detail != null) Label(detail, size = 13.sp, subtle = true, lines = 2)

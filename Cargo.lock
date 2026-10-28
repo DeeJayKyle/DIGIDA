@@ -4439,6 +4439,7 @@ dependencies = [
  "log",
  "music",
  "ndk-context",
+ "reqwest 0.13.4",
  "rquickjs-sys",
  "rustls-platform-verifier",
  "storage",

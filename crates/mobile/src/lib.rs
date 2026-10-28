@@ -27,6 +27,16 @@ const POSITION_INTERVAL: Duration = Duration::from_millis(250);
 const RESTART: Duration = Duration::from_secs(3);
 /// The slug of the provider that plays files on the phone.
 const LOCAL: &str = "local";
+/// How many bands the graphic equalizer has.
+const BANDS: usize = 10;
+/// Where AutoEq's results are read from.
+const AUTOEQ: &str = "https://raw.githubusercontent.com/jaakkopasanen/AutoEq/master/results";
+/// How long the AutoEq list is kept before it is fetched again.
+const AUTOEQ_KEEP: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+/// How many headphones a search lists at most.
+const HEADPHONE_RESULTS: usize = 100;
+/// The page proof-of-origin tokens are minted in, the desktop's own.
+const POTOKEN_PAGE: &str = "https://www.youtube.com/embed/jNQXAC9IVRw";
 
 /// Why a call into the core failed, as one line of English for a log or a toast.
 #[derive(Debug, uniffi::Error)]
@@ -134,11 +144,42 @@ pub struct ArtistPage {
     pub albums: Vec<Release>,
 }
 
-/// One line of lyrics and when it starts, which is zero throughout for unsynced lyrics.
+/// One line of lyrics and when it starts, which is zero throughout for unsynced lyrics. `words`
+/// is empty unless the source timed each word, and `romanized` is the line in Latin letters when
+/// it is written in another script.
 #[derive(Clone, Debug, uniffi::Record)]
 pub struct Line {
     pub start_ms: u64,
+    pub end_ms: Option<u64>,
     pub text: String,
+    pub romanized: Option<String>,
+    pub words: Vec<Word>,
+}
+
+/// One word of a karaoke line, and when it is sung.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct Word {
+    pub start_ms: u64,
+    pub end_ms: u64,
+    pub text: String,
+}
+
+/// What the equalizer is set to: on or off, and the ten band gains in decibels it shows, lowest
+/// band first. A headphone profile plays its own filters, so its bands read flat.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct Sound {
+    pub enabled: bool,
+    pub gains: Vec<f64>,
+    pub preset: Option<String>,
+}
+
+/// One headphone AutoEq has a correction for, and who measured it.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct Headphone {
+    pub name: String,
+    pub source: String,
+    /// Where its results live under AutoEq's `results` folder, already percent-encoded.
+    pub path: String,
 }
 
 /// A song's lyrics and where they came from.
@@ -294,8 +335,12 @@ pub struct Digida {
     answers: Mutex<Option<UnboundedSender<String>>>,
     /// The running sleep timer, aborted when it is set again or cancelled.
     sleep: Mutex<Option<tokio::task::JoinHandle<()>>>,
-    /// Keeps the equalizer's one writer alive, flat and off, for as long as the engines read it.
-    _equalizer: EqualizerWriter,
+    /// The equalizer's one writer, which every engine reads the curve from.
+    equalizer: Mutex<EqualizerWriter>,
+    /// AutoEq's list of headphone profiles, read once a run.
+    headphones: Mutex<Option<Arc<Vec<Headphone>>>>,
+    /// Where the AutoEq list is kept between runs.
+    cache: PathBuf,
     config: PlaybackConfig,
 }
 
@@ -389,7 +434,9 @@ impl Digida {
             active: Mutex::new(LOCAL.to_owned()),
             answers: Mutex::new(None),
             sleep: Mutex::new(None),
-            _equalizer: equalizer,
+            equalizer: Mutex::new(equalizer),
+            headphones: Mutex::new(None),
+            cache,
             config,
         }))
     }
@@ -703,23 +750,181 @@ impl Digida {
             music::Lyrics::Synced { lines } => lines
                 .iter()
                 .map(|line| Line {
-                    start_ms: line.start.as_millis() as u64,
+                    start_ms: millis(line.start),
+                    end_ms: line.end.map(millis),
                     text: line.text.clone(),
+                    romanized: line.romanized.as_ref().map(|it| it.text.clone()),
+                    words: line
+                        .words
+                        .iter()
+                        .flatten()
+                        .map(|word| Word {
+                            start_ms: millis(word.start),
+                            end_ms: millis(word.end),
+                            text: word.text.clone(),
+                        })
+                        .collect(),
                 })
                 .collect(),
-            music::Lyrics::Plain { text, .. } => text
-                .lines()
-                .map(|line| Line {
-                    start_ms: 0,
-                    text: line.to_owned(),
-                })
-                .collect(),
+            music::Lyrics::Plain { text, romanized } => {
+                // the romanisation is of the whole text, so it only lines up when it kept the
+                // line breaks
+                let roman: Vec<&str> = romanized
+                    .as_ref()
+                    .map(|it| it.text.lines().collect())
+                    .unwrap_or_default();
+                let count = text.lines().count();
+                text.lines()
+                    .enumerate()
+                    .map(|(at, line)| Line {
+                        start_ms: 0,
+                        end_ms: None,
+                        text: line.to_owned(),
+                        romanized: (roman.len() == count)
+                            .then(|| roman[at].to_owned())
+                            .filter(|it| !it.is_empty() && it != line),
+                        words: Vec::new(),
+                    })
+                    .collect()
+            }
         };
         Some(Words {
             synced: synced(best),
             lines,
             source: best.source.to_owned(),
         })
+    }
+
+    /// What the equalizer is set to now.
+    pub fn sound(&self) -> Sound {
+        let writer = lock(&self.equalizer);
+        let curve = writer.curve();
+        let gains = match curve.filters().len() == BANDS {
+            true => curve.filters().iter().map(|filter| filter.gain()).collect(),
+            false => vec![0.; BANDS],
+        };
+        Sound {
+            enabled: writer.enabled(),
+            gains,
+            preset: music::equalizer::Preset::matching(curve).map(|preset| preset.id().to_owned()),
+        }
+    }
+
+    /// The ids of the built-in presets, in the order a picker lists them.
+    pub fn presets(&self) -> Vec<String> {
+        music::equalizer::Preset::ALL
+            .iter()
+            .map(|preset| preset.id().to_owned())
+            .collect()
+    }
+
+    /// The ten band gains the preset `id` sets, or flat for an id there is no preset for.
+    pub fn preset_gains(&self, id: String) -> Vec<f64> {
+        music::equalizer::Preset::ALL
+            .into_iter()
+            .find(|preset| preset.id() == id)
+            .map(|preset| {
+                preset
+                    .curve()
+                    .filters()
+                    .iter()
+                    .map(|filter| filter.gain())
+                    .collect()
+            })
+            .unwrap_or_else(|| vec![0.; BANDS])
+    }
+
+    /// Turns the equalizer on or off, keeping its curve.
+    pub fn set_equalizer_enabled(&self, enabled: bool) {
+        lock(&self.equalizer).set_enabled(enabled);
+    }
+
+    /// Plays the graphic equalizer at `gains` decibels per band, gliding from the curve before
+    /// so a dragged slider never clicks.
+    pub fn set_bands(&self, gains: Vec<f64>) {
+        lock(&self.equalizer).set_curve(Curve::bands(&gains), music::equalizer::Edit::Glide);
+    }
+
+    /// Plays a correction written in Equalizer APO's format, the one AutoEq publishes, and turns
+    /// the equalizer on. Filters it cannot play are left out, which the log records.
+    pub fn set_profile(&self, text: String) -> Result<(), MobileError> {
+        let parsed = music::equalizer::apo::parse(&text).map_err(|refused| {
+            MobileError::Failed(format!("cannot read the correction: {refused:?}"))
+        })?;
+        if !parsed.skipped.is_empty() {
+            log::info!(
+                "mobile: the correction leaves out {} lines",
+                parsed.skipped.len()
+            );
+        }
+        let mut writer = lock(&self.equalizer);
+        writer.set_curve(parsed.curve, music::equalizer::Edit::Replace);
+        writer.set_enabled(true);
+        Ok(())
+    }
+
+    /// The headphones AutoEq has a correction for whose name holds every word of `query`, at
+    /// most a hundred. The list is fetched once and kept in the cache folder.
+    pub fn headphones(&self, query: String) -> Result<Vec<Headphone>, MobileError> {
+        let all = self.headphone_index()?;
+        let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
+        Ok(all
+            .iter()
+            .filter(|headphone| {
+                let name = headphone.name.to_lowercase();
+                words.iter().all(|word| name.contains(word.as_str()))
+            })
+            .take(HEADPHONE_RESULTS)
+            .cloned()
+            .collect())
+    }
+
+    /// Fetches AutoEq's parametric correction for `headphone`, plays it and hands back its text,
+    /// which the app keeps and plays again with `set_profile` next run.
+    pub fn apply_headphone(&self, headphone: Headphone) -> Result<String, MobileError> {
+        let folder = headphone
+            .path
+            .trim_start_matches("./")
+            .trim_end_matches('/');
+        let file = folder.rsplit('/').next().unwrap_or(folder);
+        let url = format!("{AUTOEQ}/{folder}/{file}%20ParametricEQ.txt");
+        let text = self.runtime.block_on(fetch(&url))?;
+        self.set_profile(text.clone())?;
+        Ok(text)
+    }
+
+    /// The identifier YouTube is waiting on a proof-of-origin token for, taken so one ask leads
+    /// to one mint.
+    pub fn potoken_wanted(&self) -> Option<String> {
+        music::potoken::wanted()
+    }
+
+    /// Files a token the app's web view minted for `binding`.
+    pub fn potoken_give(&self, binding: String, token: String) {
+        music::potoken::give(&binding, token);
+    }
+
+    /// Records that a mint failed, which holds the next one off for a while.
+    pub fn potoken_failed(&self) {
+        music::potoken::failed();
+    }
+
+    /// Records whether the app has an attested minting page open.
+    pub fn potoken_set_warm(&self, warm: bool) {
+        music::potoken::set_warm(warm);
+    }
+
+    /// The page the minting web view opens for `binding`, with the binding in its query.
+    pub fn potoken_page(&self, binding: String) -> String {
+        format!(
+            "{POTOKEN_PAGE}?binding={}",
+            music::escape::component(&binding)
+        )
+    }
+
+    /// The script the minting page runs at document start, the desktop's own.
+    pub fn potoken_script(&self) -> String {
+        include_str!("../../state/src/potoken.js").to_owned()
     }
 
     /// Plays a station of songs like `song`, the song itself first, and keeps following it as
@@ -891,6 +1096,32 @@ impl Digida {
 }
 
 impl Digida {
+    /// AutoEq's list of headphones, from memory, the cache folder or the network in that order.
+    fn headphone_index(&self) -> Result<Arc<Vec<Headphone>>, MobileError> {
+        if let Some(index) = lock(&self.headphones).clone() {
+            return Ok(index);
+        }
+        let path = self.cache.join("autoeq-index.md");
+        let fresh = std::fs::metadata(&path)
+            .and_then(|meta| meta.modified())
+            .is_ok_and(|at| at.elapsed().is_ok_and(|age| age < AUTOEQ_KEEP));
+        let text = match fresh {
+            true => std::fs::read_to_string(&path).map_err(anyhow::Error::from)?,
+            false => {
+                let text = self
+                    .runtime
+                    .block_on(fetch(&format!("{AUTOEQ}/INDEX.md")))?;
+                if let Err(error) = std::fs::write(&path, &text) {
+                    log::warn!("mobile: cannot keep the AutoEq list: {error}");
+                }
+                text
+            }
+        };
+        let index = Arc::new(text.lines().filter_map(headphone).collect::<Vec<_>>());
+        *lock(&self.headphones) = Some(index.clone());
+        Ok(index)
+    }
+
     /// Replaces the queue with `songs` and plays the one at `start`, leaving the station alone.
     fn play_queue(&self, songs: Vec<Song>, start: usize) {
         {
@@ -1413,6 +1644,39 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 }
 
 /// How many of the latest log lines the diagnostics keep.
+/// A duration in whole milliseconds.
+fn millis(at: Duration) -> u64 {
+    at.as_millis() as u64
+}
+
+/// Fetches `url` as text.
+async fn fetch(url: &str) -> Result<String, MobileError> {
+    let response = reqwest::get(url)
+        .await
+        .and_then(reqwest::Response::error_for_status)
+        .map_err(|error| MobileError::Failed(format!("cannot fetch {url}: {error}")))?;
+    response
+        .text()
+        .await
+        .map_err(|error| MobileError::Failed(format!("cannot read {url}: {error}")))
+}
+
+/// One headphone out of a line of AutoEq's index, which reads
+/// `- [Name](./source/rig/Name) by source on rig`.
+fn headphone(line: &str) -> Option<Headphone> {
+    let rest = line.strip_prefix("- [")?;
+    let (name, rest) = rest.split_once("](")?;
+    let (path, source) = match rest.rsplit_once(") by ") {
+        Some((path, by)) => (path, by.split(" on ").next().unwrap_or(by)),
+        None => (rest.strip_suffix(')')?, ""),
+    };
+    Some(Headphone {
+        name: name.to_owned(),
+        source: source.trim().to_owned(),
+        path: path.to_owned(),
+    })
+}
+
 const LOG_LINES: usize = 400;
 
 /// The latest log lines, for the diagnostics screen to show and copy.

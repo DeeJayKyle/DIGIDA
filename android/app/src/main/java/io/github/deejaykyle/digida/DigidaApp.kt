@@ -18,6 +18,7 @@ import kotlinx.coroutines.withContext
 import uniffi.digida_mobile.ArtistPage
 import uniffi.digida_mobile.Digida
 import uniffi.digida_mobile.Feed
+import uniffi.digida_mobile.Headphone
 import uniffi.digida_mobile.Words
 import uniffi.digida_mobile.Listener
 import uniffi.digida_mobile.Method
@@ -106,6 +107,10 @@ class Library(private val context: Context, private val preferences: Preferences
     private val _problem = MutableStateFlow<String?>(null)
     val problem: StateFlow<String?> = _problem.asStateFlow()
 
+    private val _sound = MutableStateFlow(preferences.sound)
+    /** What the equalizer plays, as the equalizer screen shows it. */
+    val sound: StateFlow<Sound> = _sound.asStateFlow()
+
     init {
         core.setListener(object : Listener {
             override fun changed(status: Status) {
@@ -124,6 +129,8 @@ class Library(private val context: Context, private val preferences: Preferences
             core.restore()
             _services.value = core.services()
         }
+        applySound(_sound.value)
+        PoTokenMinter(context, core).start()
     }
 
     /** Scans the chosen folders, or the phone's Music and Download folders when none are. */
@@ -263,6 +270,52 @@ class Library(private val context: Context, private val preferences: Preferences
         }
     }
 
+    /** Turns the equalizer on or off. */
+    fun setEqualizer(on: Boolean) = changeSound(_sound.value.copy(enabled = on))
+
+    /** Sets one band of the graphic equalizer, which leaves any headphone correction. */
+    fun setBand(band: Int, gain: Float) {
+        val gains = _sound.value.gains.toMutableList().also { it[band] = gain }
+        changeSound(_sound.value.copy(gains = gains, preset = null, headphone = null, profile = null))
+    }
+
+    /** Plays the built-in preset `id` on the graphic equalizer. */
+    fun setPreset(id: String) {
+        val gains = core.presetGains(id).map { it.toFloat() }
+        changeSound(Sound(enabled = true, gains = gains, preset = id))
+    }
+
+    /** The ids of the built-in presets. */
+    fun presets(): List<String> = core.presets()
+
+    /** The headphones AutoEq has a correction for that match `query`. */
+    suspend fun headphones(query: String): List<Headphone> = withContext(Dispatchers.IO) { core.headphones(query) }
+
+    /** Fetches and plays AutoEq's correction for `headphone`, keeping it for later runs. */
+    suspend fun applyHeadphone(headphone: Headphone): Result<Unit> = withContext(Dispatchers.IO) {
+        runCatching {
+            val text = core.applyHeadphone(headphone)
+            val sound = _sound.value.copy(enabled = true, headphone = headphone.name, profile = text, preset = null)
+            _sound.value = sound
+            preferences.setSound(sound)
+        }
+    }
+
+    private fun changeSound(sound: Sound) {
+        _sound.value = sound
+        preferences.setSound(sound)
+        applySound(sound)
+    }
+
+    /** Hands the core the equalizer as `sound` has it. */
+    private fun applySound(sound: Sound) {
+        val profile = sound.profile
+        if (profile == null || runCatching { core.setProfile(profile) }.isFailure) {
+            core.setBands(sound.gains.map { it.toDouble() })
+        }
+        core.setEqualizerEnabled(sound.enabled)
+    }
+
     fun playNext(song: Song) = core.playNext(song)
     fun addToQueue(song: Song) = core.addToQueue(song)
     fun removeFromQueue(index: Int) = core.removeFromQueue(index.toUInt())
@@ -289,6 +342,22 @@ sealed interface Sleep {
     data object Off : Sleep
     data object EndOfSong : Sleep
     data class Minutes(val minutes: Int) : Sleep
+}
+
+/**
+ * The equalizer as the app keeps it: on or off, the ten band gains, the preset they came from,
+ * and the headphone correction, in Equalizer APO's text, that plays instead of the bands.
+ */
+data class Sound(
+    val enabled: Boolean = false,
+    val gains: List<Float> = List(BANDS) { 0f },
+    val preset: String? = null,
+    val headphone: String? = null,
+    val profile: String? = null,
+) {
+    companion object {
+        const val BANDS = 10
+    }
 }
 
 /** The choices the app keeps between launches. */
@@ -331,6 +400,37 @@ class Preferences(context: Context) {
     fun setNormalise(on: Boolean) {
         _normalise.value = on
         store.edit().putBoolean("normalise", on).apply()
+    }
+
+    private val _romanize = MutableStateFlow(store.getBoolean("romanize", true))
+    /** Whether lyrics in another script show their Latin spelling under each line. */
+    val romanize: StateFlow<Boolean> = _romanize.asStateFlow()
+
+    fun setRomanize(on: Boolean) {
+        _romanize.value = on
+        store.edit().putBoolean("romanize", on).apply()
+    }
+
+    /** The equalizer as last set. */
+    val sound: Sound
+        get() = Sound(
+            enabled = store.getBoolean("eq_enabled", false),
+            gains = store.getString("eq_gains", null)
+                ?.split(',')?.mapNotNull { it.toFloatOrNull() }?.takeIf { it.size == Sound.BANDS }
+                ?: List(Sound.BANDS) { 0f },
+            preset = store.getString("eq_preset", null),
+            headphone = store.getString("eq_headphone", null),
+            profile = store.getString("eq_profile", null),
+        )
+
+    fun setSound(sound: Sound) {
+        store.edit()
+            .putBoolean("eq_enabled", sound.enabled)
+            .putString("eq_gains", sound.gains.joinToString(","))
+            .putString("eq_preset", sound.preset)
+            .putString("eq_headphone", sound.headphone)
+            .putString("eq_profile", sound.profile)
+            .apply()
     }
 
     fun setFolders(folders: List<String>) {

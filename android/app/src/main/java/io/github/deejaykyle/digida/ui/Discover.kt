@@ -52,6 +52,8 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -63,13 +65,20 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.graphics.lerp
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import io.github.deejaykyle.digida.DigidaApp
 import io.github.deejaykyle.digida.Library
 import io.github.deejaykyle.digida.R
 import kotlinx.coroutines.launch
@@ -77,6 +86,7 @@ import uniffi.digida_mobile.ArtistPage
 import uniffi.digida_mobile.Feed
 import uniffi.digida_mobile.Release
 import uniffi.digida_mobile.Song
+import uniffi.digida_mobile.PlayState
 import uniffi.digida_mobile.Status
 import uniffi.digida_mobile.Tile
 import uniffi.digida_mobile.TileKind
@@ -389,7 +399,7 @@ fun PlaybackSettings(library: Library, preferences: io.github.deejaykyle.digida.
 
 /** A setting that is on or off, with a line saying what it does. */
 @Composable
-private fun Toggle(title: String, detail: String, on: Boolean, onChange: (Boolean) -> Unit) {
+internal fun Toggle(title: String, detail: String, on: Boolean, onChange: (Boolean) -> Unit) {
     val palette = LocalPalette.current
     Row(
         Modifier.fillMaxWidth().surface(palette, Depth.Low).clickable { onChange(!on) }.padding(14.dp),
@@ -527,6 +537,8 @@ fun QueuePanel(status: Status, library: Library, onClose: () -> Unit) {
 @Composable
 fun LyricsPanel(status: Status, library: Library, onClose: () -> Unit) {
     val palette = LocalPalette.current
+    val preferences = (LocalContext.current.applicationContext as DigidaApp).preferences
+    val romanize by preferences.romanize.collectAsStateWithLifecycle()
     val song = status.song
     var words by remember(song?.id) { mutableStateOf<Words?>(null) }
     var searched by remember(song?.id) { mutableStateOf(false) }
@@ -535,15 +547,20 @@ fun LyricsPanel(status: Status, library: Library, onClose: () -> Unit) {
         searched = true
     }
     val shown = words
-    val at = status.positionMs.toLong()
+    val at = playhead(status)
     val current = shown?.takeIf { it.synced }?.lines?.indexOfLast { it.startMs.toLong() <= at } ?: -1
     val listing = rememberLazyListState()
     val scope = rememberCoroutineScope()
     LaunchedEffect(current) { if (current > 2) scope.launch { listing.animateScrollToItem(current - 2) } }
+    val romanized = shown?.lines?.any { it.romanized != null } == true
 
     Column(Modifier.fillMaxSize().padding(top = 8.dp)) {
         Row(Modifier.padding(horizontal = 18.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
             Label(stringResource(R.string.lyrics), Modifier.weight(1f), size = 22.sp, weight = FontWeight.Bold)
+            if (romanized) {
+                SmallButton(stringResource(R.string.romanize), accent = romanize) { preferences.setRomanize(!romanize) }
+                Spacer(Modifier.width(8.dp))
+            }
             IconPill(Icons.Rounded.Close, stringResource(R.string.back), onClose, size = 38.dp)
         }
         when {
@@ -553,20 +570,39 @@ fun LyricsPanel(status: Status, library: Library, onClose: () -> Unit) {
                 itemsIndexed(shown.lines) { index, line ->
                     val lit = index == current
                     val glow by animateFloatAsState(if (lit || !shown.synced) 1f else 0.42f, label = "line")
-                    Text(
-                        line.text.ifBlank { "♪" },
-                        modifier = Modifier
+                    val grow by animateFloatAsState(if (lit) 1.08f else 1f, spring(dampingRatio = 0.7f), label = "grow")
+                    Column(
+                        Modifier
                             .fillMaxWidth()
-                            .graphicsLayer { alpha = glow }
+                            .graphicsLayer {
+                                alpha = glow
+                                scaleX = grow
+                                scaleY = grow
+                                transformOrigin = androidx.compose.ui.graphics.TransformOrigin(0f, 0.5f)
+                            }
                             .clickable(enabled = shown.synced) { library.seek(line.startMs.toLong()) }
                             .padding(vertical = 8.dp),
-                        style = TextStyle(
-                            color = if (lit) palette.text else palette.subtle,
-                            fontSize = if (lit) 26.sp else 22.sp,
-                            fontWeight = FontWeight.Bold,
-                            textAlign = TextAlign.Start,
-                        ),
-                    )
+                    ) {
+                        val style = TextStyle(fontSize = 24.sp, fontWeight = FontWeight.Bold, textAlign = TextAlign.Start)
+                        when {
+                            lit && line.words.isNotEmpty() -> Text(karaoke(line, at, palette), style = style)
+                            else -> Text(
+                                line.text.ifBlank { "♪" },
+                                style = style.copy(color = if (lit) palette.text else palette.subtle),
+                            )
+                        }
+                        val roman = line.romanized
+                        if (romanize && roman != null) {
+                            Text(
+                                roman,
+                                style = TextStyle(
+                                    color = if (lit) palette.text.copy(alpha = 0.75f) else palette.subtle,
+                                    fontSize = 15.sp,
+                                    fontWeight = FontWeight.Medium,
+                                ),
+                            )
+                        }
+                    }
                 }
                 item {
                     Label(stringResource(R.string.lyrics_source, shown.source), Modifier.padding(vertical = 18.dp), size = 12.sp, subtle = true)
@@ -575,3 +611,42 @@ fun LyricsPanel(status: Status, library: Library, onClose: () -> Unit) {
         }
     }
 }
+
+/**
+ * Where the song is now, in milliseconds. The core reports the position a few times a second,
+ * so while playing this runs on from the last report every frame, which keeps a karaoke sweep
+ * smooth.
+ */
+@Composable
+private fun playhead(status: Status): Long {
+    val reported = status.positionMs.toLong()
+    val since = remember(reported) { System.nanoTime() }
+    var now by remember { mutableLongStateOf(reported) }
+    LaunchedEffect(reported, status.state) {
+        now = reported
+        if (status.state != PlayState.PLAYING) return@LaunchedEffect
+        while (true) {
+            withFrameNanos { frame -> now = reported + ((frame - since).coerceAtLeast(0) / 1_000_000) }
+        }
+    }
+    return now
+}
+
+/** The line at `at` with every sung word lit, and the word being sung lighting up as it goes. */
+private fun karaoke(line: uniffi.digida_mobile.Line, at: Long, palette: Palette): AnnotatedString =
+    buildAnnotatedString {
+        val text = line.text
+        val waiting = palette.subtle
+        var cursor = 0
+        for (word in line.words) {
+            val found = text.indexOf(word.text.trim(), cursor).takeIf { word.text.isNotBlank() && it >= 0 }
+            val start = found ?: cursor
+            val end = if (found != null) found + word.text.trim().length else cursor
+            if (start > cursor) withStyle(SpanStyle(color = waiting)) { append(text.substring(cursor, start)) }
+            val span = (word.endMs - word.startMs).toLong().coerceAtLeast(1)
+            val progress = ((at - word.startMs.toLong()).toFloat() / span).coerceIn(0f, 1f)
+            withStyle(SpanStyle(color = lerp(waiting, palette.text, progress))) { append(text.substring(start, end)) }
+            cursor = end
+        }
+        if (cursor < text.length) withStyle(SpanStyle(color = waiting)) { append(text.substring(cursor)) }
+    }

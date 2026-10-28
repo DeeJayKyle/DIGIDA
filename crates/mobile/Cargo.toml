@@ -15,6 +15,7 @@ anyhow.workspace = true
 log.workspace = true
 music = { workspace = true, features = ["bundled-sqlite"] }
 storage = { workspace = true, features = ["bundled-sqlite"] }
+reqwest.workspace = true
 tokio.workspace = true
 uniffi.workspace = true
 
