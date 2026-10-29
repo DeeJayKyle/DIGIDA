@@ -390,6 +390,7 @@ impl ItemMenu {
         let download = (!imported)
             .then(|| download_item(tracks, &ids, cx))
             .flatten();
+        let save_files = save_files_item(SaveFiles::Tracks(tracks.to_vec()), cx);
 
         let album = match (many, columns.album, track.album_id.clone()) {
             (true, _, _) | (false, true, _) => None,
@@ -502,6 +503,7 @@ impl ItemMenu {
                     .chain([library_action.unwrap_or(toggle_library)])
                     .chain(membership)
                     .chain(download)
+                    .chain(save_files)
                     .collect(),
                 [next, queue, last].into_iter().chain(radio).collect(),
                 album.into_iter().chain(artist).collect(),
@@ -728,6 +730,7 @@ pub(crate) fn album_menu(
         true => Vec::new(),
         false => set_download_items(Collection::Album, Saved::Album(album.clone()), cx),
     };
+    let save_files = save_files_item(SaveFiles::Album(album_id.clone()), cx);
     let add_to_playlist = MenuItem::new("add-album-to-playlist", t!("menu-add-to-playlist"))
         .icon("icons/square-plus.svg")
         .submenu(
@@ -747,6 +750,7 @@ pub(crate) fn album_menu(
                 .into_iter()
                 .chain(album_membership_item(album.clone(), cx))
                 .chain(download)
+                .chain(save_files)
                 .collect(),
             vec![
                 MenuItem::new("play-album-next", t!("menu-play-next"))
@@ -942,6 +946,7 @@ pub(crate) fn playlist_menu(playlist: Playlist, playback: Entity<Playback>, cx: 
         true => Vec::new(),
         false => set_download_items(Collection::Playlist, Saved::Playlist(playlist.clone()), cx),
     };
+    let save_files = save_files_item(SaveFiles::Playlist(playlist.id.clone()), cx);
     let visibility = (!imported).then(|| {
         MenuItem::new(
             "playlist-visibility",
@@ -1009,7 +1014,11 @@ pub(crate) fn playlist_menu(playlist: Playlist, playback: Entity<Playback>, cx: 
                         });
                     }),
             ],
-            actions.into_iter().chain(download).collect(),
+            actions
+                .into_iter()
+                .chain(download)
+                .chain(save_files)
+                .collect(),
             match imported {
                 true => Vec::new(),
                 false => vec![copy_link_item(
@@ -1298,6 +1307,38 @@ pub(crate) fn new_playlist_menu(
         MenuItem::new("create-playlist", t!("menu-new-playlist"))
             .icon("icons/plus.svg")
             .on_click(on_create),
+    )
+}
+
+/// What a save-files item writes out: some songs, or a whole album or playlist by its id.
+enum SaveFiles {
+    Tracks(Vec<Track>),
+    Album(String),
+    Playlist(String),
+}
+
+/// Saves the files of a selection, album or playlist into the music folder. It shows only for
+/// the listener's own server, the one service that hands its files over.
+fn save_files_item(what: SaveFiles, cx: &App) -> Option<MenuItem> {
+    let files = Sonora::global(cx).files.clone();
+    if !files.read(cx).offered(cx) {
+        return None;
+    }
+    let label = match &what {
+        SaveFiles::Tracks(tracks) => counted("menu-save-file", "menu-save-files", tracks.len()),
+        SaveFiles::Album(_) | SaveFiles::Playlist(_) => t!("menu-save-files-all"),
+    };
+    let what = std::sync::Arc::new(what);
+    Some(
+        MenuItem::new("save-files", label)
+            .icon("icons/folder-plus.svg")
+            .on_click(move |_, _, cx| {
+                files.update(cx, |files, cx| match what.as_ref() {
+                    SaveFiles::Tracks(tracks) => files.save_tracks(tracks.clone(), cx),
+                    SaveFiles::Album(id) => files.save_album(id.clone(), cx),
+                    SaveFiles::Playlist(id) => files.save_playlist(id.clone(), cx),
+                })
+            }),
     )
 }
 

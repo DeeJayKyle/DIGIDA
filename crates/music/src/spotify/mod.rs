@@ -39,6 +39,8 @@ pub struct SpotifyProvider {
     config: AuthConfig,
     /// Whether the account signed in last has no Premium, so its songs cannot play here.
     free: std::sync::atomic::AtomicBool,
+    /// The service an account without Premium plays its songs from, signed in as a guest.
+    stand_in: Option<Arc<dyn MusicProvider>>,
 }
 
 impl SpotifyProvider {
@@ -46,7 +48,16 @@ impl SpotifyProvider {
         Self {
             config,
             free: std::sync::atomic::AtomicBool::new(false),
+            stand_in: None,
         }
+    }
+
+    /// Keeps an account without Premium signed in and plays each of its songs from its match on
+    /// `provider`, which is signed in as a guest for it.
+    pub fn playing_free_through(mut self, provider: Arc<dyn MusicProvider>) -> Self {
+        self.config.free = true;
+        self.stand_in = Some(provider);
+        self
     }
 
     /// Keeps an account without Premium signed in for its library, for an app that plays the
@@ -81,10 +92,15 @@ impl SpotifyProvider {
             std::sync::atomic::Ordering::Relaxed,
         );
         let profile = client.profile().await?;
-        let playback = Arc::new(Factory::new(client.session().clone()));
+        let factory = Factory::new(client.session().clone());
+        let api: Arc<dyn crate::MusicApi> = Arc::new(client);
+        let playback: Arc<dyn PlaybackFactory> = match (self.free(), &self.stand_in) {
+            (true, Some(provider)) => self.stand_in(api.clone(), provider).await?,
+            _ => Arc::new(factory),
+        };
         Ok(ProviderSession {
             profile,
-            api: Arc::new(client),
+            api,
             playback,
             shape: Shape::Saved,
             authenticated: true,
@@ -95,6 +111,31 @@ impl SpotifyProvider {
                 ..Capabilities::ALL
             },
         })
+    }
+}
+
+impl SpotifyProvider {
+    /// Playback for an account without Premium: `provider` signed in as a guest, playing each
+    /// song's match there.
+    async fn stand_in(
+        &self,
+        api: Arc<dyn crate::MusicApi>,
+        provider: &Arc<dyn MusicProvider>,
+    ) -> Result<Arc<dyn PlaybackFactory>> {
+        let (_answers, input) = tokio::sync::mpsc::unbounded_channel();
+        let guest = provider
+            .sign_in(crate::SignIn::Anonymous, Arc::new(|_| {}), input)
+            .await?;
+        log::info!(
+            "spotify: the account has no Premium, so its songs play from {}",
+            provider.name()
+        );
+        Ok(Arc::new(crate::standin::StandIn::new(
+            api,
+            guest.api,
+            guest.playback,
+            self.config.cache_dir.join("matches.json"),
+        )))
     }
 }
 

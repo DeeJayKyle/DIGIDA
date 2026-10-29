@@ -37,14 +37,8 @@ const CACHE_LIMIT: u64 = 2 << 30;
 /// The name a scrobbling service's approval page is asked for under.
 const SCROBBLING: &str = "scrobbling";
 const YOUTUBE: &str = "youtube";
-/// How far apart two recordings' lengths may be and still be the same song, in milliseconds.
-const MATCH_LENGTH: u64 = 15_000;
 /// How many bands the graphic equalizer has.
 const BANDS: usize = 10;
-/// Where AutoEq's results are read from.
-const AUTOEQ: &str = "https://raw.githubusercontent.com/jaakkopasanen/AutoEq/master/results";
-/// How long the AutoEq list is kept before it is fetched again.
-const AUTOEQ_KEEP: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 /// How many headphones a search lists at most.
 const HEADPHONE_RESULTS: usize = 100;
 /// The page proof-of-origin tokens are minted in, the desktop's own.
@@ -345,21 +339,6 @@ struct Station {
     from: Option<String>,
 }
 
-/// One search result weighed as a match: whether it is about as long, how much of the title and
-/// of the artist it holds, from none at zero to all at one, and its id.
-struct Candidate {
-    close: bool,
-    named: f64,
-    by: f64,
-    id: String,
-}
-
-impl Candidate {
-    fn score(&self) -> f64 {
-        self.named + self.by
-    }
-}
-
 /// The core. One per app process.
 #[derive(uniffi::Object)]
 pub struct Digida {
@@ -374,7 +353,7 @@ pub struct Digida {
     /// The equalizer's one writer, which every engine reads the curve from.
     equalizer: Mutex<EqualizerWriter>,
     /// AutoEq's list of headphone profiles, read once a run.
-    headphones: Mutex<Option<Arc<Vec<Headphone>>>>,
+    headphones: Mutex<Option<Arc<Vec<music::equalizer::autoeq::Headphone>>>>,
     /// Where the AutoEq list is kept between runs.
     cache: PathBuf,
     config: PlaybackConfig,
@@ -949,28 +928,29 @@ impl Digida {
     /// most a hundred. The list is fetched once and kept in the cache folder.
     pub fn headphones(&self, query: String) -> Result<Vec<Headphone>, MobileError> {
         let all = self.headphone_index()?;
-        let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
-        Ok(all
-            .iter()
-            .filter(|headphone| {
-                let name = headphone.name.to_lowercase();
-                words.iter().all(|word| name.contains(word.as_str()))
-            })
-            .take(HEADPHONE_RESULTS)
-            .cloned()
-            .collect())
+        Ok(
+            music::equalizer::autoeq::search(&all, &query, HEADPHONE_RESULTS)
+                .into_iter()
+                .map(|found| Headphone {
+                    name: found.name,
+                    source: found.source,
+                    path: found.path,
+                })
+                .collect(),
+        )
     }
 
     /// Fetches AutoEq's parametric correction for `headphone`, plays it and hands back its text,
     /// which the app keeps and plays again with `set_profile` next run.
     pub fn apply_headphone(&self, headphone: Headphone) -> Result<String, MobileError> {
-        let folder = headphone
-            .path
-            .trim_start_matches("./")
-            .trim_end_matches('/');
-        let file = folder.rsplit('/').next().unwrap_or(folder);
-        let url = format!("{AUTOEQ}/{folder}/{file}%20ParametricEQ.txt");
-        let text = self.runtime.block_on(fetch(&url))?;
+        let wanted = music::equalizer::autoeq::Headphone {
+            name: headphone.name,
+            source: headphone.source,
+            path: headphone.path,
+        };
+        let text = self
+            .runtime
+            .block_on(music::equalizer::autoeq::profile(&wanted))?;
         self.set_profile(text.clone())?;
         Ok(text)
     }
@@ -1178,28 +1158,18 @@ impl Digida {
 }
 
 impl Digida {
-    /// AutoEq's list of headphones, from memory, the cache folder or the network in that order.
-    fn headphone_index(&self) -> Result<Arc<Vec<Headphone>>, MobileError> {
+    /// AutoEq's list of headphones, from memory, or the shared list kept in the cache folder.
+    fn headphone_index(
+        &self,
+    ) -> Result<Arc<Vec<music::equalizer::autoeq::Headphone>>, MobileError> {
         if let Some(index) = lock(&self.headphones).clone() {
             return Ok(index);
         }
-        let path = self.cache.join("autoeq-index.md");
-        let fresh = std::fs::metadata(&path)
-            .and_then(|meta| meta.modified())
-            .is_ok_and(|at| at.elapsed().is_ok_and(|age| age < AUTOEQ_KEEP));
-        let text = match fresh {
-            true => std::fs::read_to_string(&path).map_err(anyhow::Error::from)?,
-            false => {
-                let text = self
-                    .runtime
-                    .block_on(fetch(&format!("{AUTOEQ}/INDEX.md")))?;
-                if let Err(error) = std::fs::write(&path, &text) {
-                    log::warn!("mobile: cannot keep the AutoEq list: {error}");
-                }
-                text
-            }
-        };
-        let index = Arc::new(text.lines().filter_map(headphone).collect::<Vec<_>>());
+        let kept = self.cache.join("autoeq-index.md");
+        let index = Arc::new(
+            self.runtime
+                .block_on(music::equalizer::autoeq::index(&kept))?,
+        );
         *lock(&self.headphones) = Some(index.clone());
         Ok(index)
     }
@@ -1802,88 +1772,15 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 }
 
 /// How many of the latest log lines the diagnostics keep.
-/// The YouTube Music song that is `song`, looked for by its title and first artist. Labels
-/// Spotify adds in brackets or after a dash, like "(Live)" or "- Remastered", are left out of the
-/// search, since an upload rarely carries them. A result about as long whose title and artist
-/// agree most wins; failing one, a result whose title holds the whole of the song's title and
-/// names its artist, however long it runs, since a live or cover take seldom keeps the length.
+/// The YouTube Music song that is `song`, by the matcher the desktop's stand-in uses too.
 async fn matched(shared: &Shared, song: &Song) -> Option<String> {
     let api = api_of(shared, YOUTUBE)?;
-    let core = core_title(&song.title);
-    let lead = song
-        .artist
-        .split([',', '&'])
-        .next()
-        .unwrap_or(&song.artist)
-        .trim();
-    let query = format!("{core} {lead}");
-    let tracks = api
-        .search(&query)
-        .await
-        .inspect_err(|error| log::warn!("mobile: youtube cannot search for a match: {error:#}"))
-        .ok()?;
-    let title = words(&core);
-    let artist = words(lead);
-    let scored: Vec<Candidate> = songs(tracks, YOUTUBE)
-        .into_iter()
-        .map(|candidate| Candidate {
-            close: song.duration_ms == 0
-                || candidate.duration_ms == 0
-                || candidate.duration_ms.abs_diff(song.duration_ms) <= MATCH_LENGTH,
-            named: overlap(&title, &words(&candidate.title)),
-            by: overlap(
-                &artist,
-                &words(&format!("{} {}", candidate.artist, candidate.title)),
-            ),
-            id: candidate.id,
-        })
-        .collect();
-    let best = |keep: fn(&Candidate) -> bool| {
-        scored
-            .iter()
-            .filter(|candidate| keep(candidate))
-            .max_by(|a, b| a.score().total_cmp(&b.score()))
-            .map(|candidate| candidate.id.clone())
+    let wanted = music::standin::Wanted {
+        title: &song.title,
+        artist: &song.artist,
+        duration: Duration::from_millis(song.duration_ms),
     };
-    best(|candidate| candidate.close && candidate.named > 0.5)
-        .or_else(|| best(|candidate| candidate.named >= 1. && candidate.by > 0.))
-}
-
-/// A title without the labels a service adds to it: whatever is in brackets, and whatever follows
-/// a spaced dash. A title that is nothing but labels stays as it was.
-fn core_title(title: &str) -> String {
-    let mut core = String::new();
-    let mut depth = 0usize;
-    for c in title.chars() {
-        match c {
-            '(' | '[' => depth += 1,
-            ')' | ']' => depth = depth.saturating_sub(1),
-            c if depth == 0 => core.push(c),
-            _ => {}
-        }
-    }
-    let core = core.split(" - ").next().unwrap_or(&core).trim().to_owned();
-    match core.is_empty() {
-        true => title.to_owned(),
-        false => core,
-    }
-}
-
-/// The lowercase words of `text`, with punctuation dropped.
-fn words(text: &str) -> Vec<String> {
-    text.split(|c: char| !c.is_alphanumeric())
-        .filter(|word| !word.is_empty())
-        .map(str::to_lowercase)
-        .collect()
-}
-
-/// How many of `wanted`'s words `found` holds, from none at zero to all at one.
-fn overlap(wanted: &[String], found: &[String]) -> f64 {
-    if wanted.is_empty() {
-        return 0.;
-    }
-    let held = wanted.iter().filter(|word| found.contains(word)).count();
-    held as f64 / wanted.len() as f64
+    music::standin::matched(api.as_ref(), &wanted).await
 }
 
 /// Unlocks `vault` with the key kept in `data`, making one on the first run. A key gone missing
@@ -1914,34 +1811,6 @@ fn unlock(vault: &music::vault::Vault, data: &std::path::Path) {
 /// A duration in whole milliseconds.
 fn millis(at: Duration) -> u64 {
     at.as_millis() as u64
-}
-
-/// Fetches `url` as text.
-async fn fetch(url: &str) -> Result<String, MobileError> {
-    let response = reqwest::get(url)
-        .await
-        .and_then(reqwest::Response::error_for_status)
-        .map_err(|error| MobileError::Failed(format!("cannot fetch {url}: {error}")))?;
-    response
-        .text()
-        .await
-        .map_err(|error| MobileError::Failed(format!("cannot read {url}: {error}")))
-}
-
-/// One headphone out of a line of AutoEq's index, which reads
-/// `- [Name](./source/rig/Name) by source on rig`.
-fn headphone(line: &str) -> Option<Headphone> {
-    let rest = line.strip_prefix("- [")?;
-    let (name, rest) = rest.split_once("](")?;
-    let (path, source) = match rest.rsplit_once(") by ") {
-        Some((path, by)) => (path, by.split(" on ").next().unwrap_or(by)),
-        None => (rest.strip_suffix(')')?, ""),
-    };
-    Some(Headphone {
-        name: name.to_owned(),
-        source: source.trim().to_owned(),
-        path: path.to_owned(),
-    })
 }
 
 const LOG_LINES: usize = 400;

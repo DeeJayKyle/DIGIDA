@@ -8,7 +8,8 @@ use music::equalizer::{Curve, MAX_FILTERS, PREAMP_RANGE, Preamp, Preset, TONE_RA
 use music::output::{DeviceOption, OutputId, Port};
 use router::Destination;
 use state::{
-    AppSettings, Equalizer, Outputs, RuleDevice, Signal, Sonora, Sound, equalizer_profile_label,
+    AppSettings, Equalizer, Headphones, Outputs, RuleDevice, Signal, Sonora, Sound,
+    equalizer_profile_label,
 };
 use ui::{
     ActiveTheme as _, Button, Dismiss, FORM_CONTEXT, Input, Lazy, MenuItem, Modal, Picker,
@@ -25,6 +26,7 @@ use meter::OutputMeter;
 use rows::{Fields, figure, figure_cell};
 
 mod graph;
+mod headphones;
 mod meter;
 mod rows;
 mod rules;
@@ -90,6 +92,9 @@ pub(crate) struct EqualizerView {
     watch: Option<Task<()>>,
     /// The file being read in or written out.
     file: Option<Task<()>>,
+    /// The search over AutoEQ's headphones, and its field.
+    headphones: Entity<Headphones>,
+    headphone_query: Entity<Input>,
 }
 
 /// What the name dialog is open for.
@@ -147,6 +152,7 @@ impl Shelf {
 struct Parts {
     controls: Entity<Part>,
     below: Entity<Part>,
+    headphones: Entity<Part>,
     advanced: Entity<Part>,
 }
 
@@ -222,6 +228,20 @@ impl EqualizerView {
             EqualizerGraph::new(equalizer.clone(), settings.clone(), outputs.clone(), cx)
         });
         let spectrum = cx.new(|cx| EqualizerSpectrum::new(signal.clone(), cx));
+        let headphones = cx.new(|_| Headphones::new(equalizer.clone()));
+        let headphone_query = cx.new(|cx| {
+            Input::new("equalizer-headphones-hint", cx)
+                .icon("icons/search.svg")
+                .compact()
+                .clearable()
+        });
+        cx.observe(&headphone_query, |this, query, cx| {
+            let query = query.read(cx).text().to_owned();
+            this.headphones
+                .update(cx, |headphones, cx| headphones.search(&query, cx));
+        })
+        .detach();
+        cx.observe(&headphones, |_, _, cx| cx.notify()).detach();
 
         cx.observe(&equalizer, |this, _, cx| {
             this.show_curve(cx);
@@ -260,6 +280,8 @@ impl EqualizerView {
             drawn: None,
             watch: None,
             file: None,
+            headphones,
+            headphone_query,
         };
         let fields: Vec<_> = view
             .fields()
@@ -281,6 +303,7 @@ impl EqualizerView {
             .get_or_insert_with(|| Parts {
                 controls: cx.new(|cx| Part::new(&page, Self::controls, cx)),
                 below: cx.new(|cx| Part::new(&page, Self::below, cx)),
+                headphones: cx.new(|cx| Part::new(&page, Self::headphones_group, cx)),
                 advanced: cx.new(|cx| Part::new(&page, Self::advanced, cx)),
             })
             .clone()
@@ -815,6 +838,7 @@ impl Render for EqualizerView {
             .flex_col()
             .gap(settings::GROUPS)
             .child(sound)
+            .child(shown(&parts.headphones, cx))
             .when(advanced, |this| this.child(shown(&parts.advanced, cx)));
 
         settings::frame(

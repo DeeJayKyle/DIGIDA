@@ -2,10 +2,12 @@ use std::fs::File;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use gpui::PathPromptOptions;
 use gpui::prelude::*;
 use gpui::{AnyElement, Context, FontWeight, SharedString, div, img};
 use i18n::t;
-use ui::{ActiveTheme as _, Avatar, Switch, Text};
+use state::{Outcome, Toast, Toasts};
+use ui::{ActiveTheme as _, Avatar, Button, Switch, Text};
 
 use super::rows::outward;
 use super::{Group, SettingsView, Slot, group_heading};
@@ -54,6 +56,9 @@ macro_rules! member {
     };
 }
 
+/// What a settings backup is called when it is first saved.
+const BACKUP_NAME: &str = "digida-settings.json";
+
 const MEMBERS: [Member; 5] = [
     member!("nolight132", Role::LeadMaintainer),
     member!("zxsleebu", Role::Maintainer),
@@ -68,6 +73,7 @@ impl SettingsView {
             Slot::Version,
             Slot::Updates,
             Slot::Log,
+            Slot::Backup,
             Slot::License,
             Slot::Source,
         ])]
@@ -111,6 +117,105 @@ impl SettingsView {
                 }
             })
             .into_any_element()
+    }
+
+    /// The row that saves the settings to a file and puts a saved file back in their place.
+    pub(super) fn backup_row(&self, cx: &mut Context<Self>) -> AnyElement {
+        let button =
+            |id: &'static str, label: SharedString| Button::new(id).small().outline().label(label);
+        self.row(
+            t!("settings-backup"),
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(
+                    button("settings-backup-save", t!("settings-backup-save"))
+                        .on_click(cx.listener(|this, _, _, cx| this.save_backup(cx))),
+                )
+                .child(
+                    button("settings-backup-restore", t!("settings-backup-restore"))
+                        .on_click(cx.listener(|this, _, _, cx| this.restore_backup(cx))),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// Asks where to write the settings and writes them there.
+    fn save_backup(&mut self, cx: &mut Context<Self>) {
+        let bytes = match self.settings.read(cx).backup() {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                log::warn!("settings: cannot back up: {error:#}");
+                Toasts::show(Outcome::Failed, "settings-backup-failed", cx);
+                return;
+            }
+        };
+        let directory = dirs::document_dir()
+            .or_else(dirs::home_dir)
+            .unwrap_or_default();
+        let receiver = cx.prompt_for_new_path(&directory, Some(BACKUP_NAME));
+        self.backup = Some(cx.spawn(async move |_, cx| {
+            let Ok(Ok(Some(path))) = receiver.await else {
+                return;
+            };
+            let written = cx
+                .background_spawn(async move { std::fs::write(path, bytes) })
+                .await;
+            cx.update(|cx| match written {
+                Ok(()) => Toasts::show(Outcome::Done, "settings-backup-saved", cx),
+                Err(error) => {
+                    log::warn!("settings: cannot write the backup: {error}");
+                    Toasts::post(
+                        Toast::new(Outcome::Failed, "settings-backup-failed")
+                            .detail(error.to_string()),
+                        cx,
+                    );
+                }
+            });
+        }));
+    }
+
+    /// Asks for a backup and puts it in place of the settings, which then reload.
+    fn restore_backup(&mut self, cx: &mut Context<Self>) {
+        let receiver = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: None,
+        });
+        self.backup = Some(cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(paths))) = receiver.await else {
+                return;
+            };
+            let Some(path) = paths.into_iter().next() else {
+                return;
+            };
+            let read = cx
+                .background_spawn(async move { std::fs::read(path) })
+                .await;
+            this.update(cx, |this, cx| {
+                let restored = match read {
+                    Ok(bytes) => this
+                        .settings
+                        .read(cx)
+                        .restore(&bytes)
+                        .map_err(|error| format!("{error:#}")),
+                    Err(error) => Err(error.to_string()),
+                };
+                match restored {
+                    Ok(()) => Toasts::show(Outcome::Done, "settings-backup-restored", cx),
+                    Err(error) => {
+                        log::warn!("settings: cannot restore the backup: {error}");
+                        Toasts::post(
+                            Toast::new(Outcome::Failed, "settings-backup-unreadable").detail(error),
+                            cx,
+                        );
+                    }
+                }
+            })
+            .ok();
+        }));
     }
 
     pub(super) fn license_row(&self, cx: &mut Context<Self>) -> AnyElement {
